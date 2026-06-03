@@ -139,9 +139,113 @@ typedef enum {
 
 ### 2.4 注释
 
+#### 2.4.1 注释原则
+
 - 注释语言遵循项目约定；项目无约定时可用中文或用户指定语言。
 - 注释解释硬件原因、约束、时序和意图；不要逐行复述代码。
+- 注释应回答"为什么"而非"是什么"——代码本身说明"是什么"，注释补充"为什么这样写"。
+- 保持注释与代码同步更新；过时注释比无注释更有害。
+
+#### 2.4.2 必须注释的场景
+
+| 场景 | 说明 | 示例 |
+|------|------|------|
+| 硬件约束 | 寄存器写入顺序、时序要求、errata workaround | `/* 必须先写 CTRL 再写 DATA，否则 FIFO 错位（Errata 3.2） */` |
+| 非显而易见的逻辑 | 算法选择原因、特殊边界处理 | `/* 使用查表法而非计算，节省 12 个 CPU 周期 */` |
+| 临时方案 | workaround、TODO、待确认项 | `/* FIXME: 临时绕过芯片 Rev.A 的 DMA 冻结问题 */` |
+| 安全关键路径 | 看门狗刷新点、冗余检查、故障注入点 | `/* 喂狗必须在 SPI 传输完成后，否则超时复位 */` |
+| 并发/中断相关 | critical section、屏障、volatile 使用原因 | `/* 关中断保护 tx_tail，ISR 中会修改 */` |
+| 魔数来源 | 非自明的常量值来源 | `/* 1200 = 72MHz / (16 * 3750)，参考手册 §23.4.2 */` |
+
+#### 2.4.3 注释格式
+
+**函数注释**（公共 API 必须有，静态辅助函数酌情）：
+
+```c
+/**
+ * @brief  初始化 UART 外设并配置波特率
+ * @param  handle  UART 句柄指针，调用前需填充 config 字段
+ * @param  baud    目标波特率（支持 9600 / 115200 / 921600）
+ * @return EmbedCode_Ok 成功；EmbedCode_ErrNullPtr handle 为空；
+ *         EmbedCode_ErrInvalidArg 波特率不支持
+ * @note   调用前需确保 GPIO 已配置为 AF 模式
+ * @note   本函数会禁用 UART 后重新配置，不保留当前状态
+ */
+embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud);
+```
+
+**内联注释**（关键行上方或同行）：
+
+```c
+/* 等待发送完成，超时防止硬件死锁（参考手册建议 ≥1ms） */
+uint32_t timeout = UART_TX_TIMEOUT_MS;
+while (!(UART_REG->STATUS & UART_SR_TX_EMPTY) && --timeout) {
+    /* 空等：ISR 模式下此循环不应执行，保留作为 safety net */
+}
+```
+
+**结构体/枚举注释**：
+
+```c
+typedef struct {
+    uint8_t *rx_buffer;     /* 接收环形缓冲区，由应用层分配，驱动层不管理生命周期 */
+    uint16_t rx_head;       /* ISR 写入位置（volatile），主循环只读 */
+    uint16_t rx_tail;       /* 主循环读取位置，ISR 只读 */
+    volatile bool tx_busy;  /* 发送忙标志，ISR 在发送完成时清零 */
+} uart_handle_t;
+```
+
+**寄存器注释**：
+
+```c
+typedef struct {
+    volatile uint32_t CTRL;    /* 0x00 控制寄存器：bit[0]=EN, bit[2:1]=MODE, bit[4]=IE */
+    volatile uint32_t STATUS;  /* 0x04 状态寄存器：bit[0]=TX_EMPTY, bit[1]=RX_FULL, bit[3]=ERR */
+    const  uint32_t RESERVED0[2];
+    volatile uint32_t DATA;    /* 0x10 数据寄存器：写=TX FIFO，读=RX FIFO */
+} uart_reg_t;
+```
+
+#### 2.4.4 标记约定
+
+项目无既有约定时，使用以下统一标记：
+
+| 标记 | 含义 | 何时移除 |
+|------|------|----------|
+| `USER_PROVIDED` | 需用户填入真实硬件值 | 用户提供信息后 |
+| `PLACEHOLDER` | 临时占位值，功能正确但不完整 | 硬件信息确认后 |
+| `REPO_DERIVED` | 从仓库现有代码推导，可能不准确 | 对照手册验证后 |
+| `TODO:` | 待实现或待优化的功能 | 功能完成或优化后 |
+| `FIXME:` | 已知缺陷或临时 workaround | 缺陷修复后 |
+| `HACK:` | 依赖特定版本/硬件行为的临时方案 | 正式方案实现后 |
+| `NOTE:` | 重要但非显而易见的说明 | 永久保留 |
+| `WARNING:` | 潜在风险点，错误修改可能导致硬件损坏 | 永久保留 |
+| `OPTIMIZE:` | 已验证正确的候选优化点 | 优化实施后 |
+
+使用示例：
+
+```c
+/* NOTE: 此函数不在 ISR 上下文中调用，无重入风险 */
+/* WARNING: 修改 BAUD 寄存器值可能导致正在进行的传输损坏 */
+/* FIXME: Rev.A 芯片需要额外 2 个 NOP 等待 FIFO 稳定，Rev.B 后移除 */
+/* USER_PROVIDED: 根据实际外部晶振频率填入 PLL 分频系数 */
+/* PLACEHOLDER: 当前使用 115200，最终波特率由系统设计决定 */
+/* HACK: 依赖 FreeRTOS v10.4+ 的 xQueueOverwriteFromISR，低版本需改用方案 B */
+```
+
+#### 2.4.5 文件头注释
+
 - Doxygen 文件头只在项目已有模式时添加。
+- 若项目需要文件头，格式如下：
+
+```c
+/**
+ * @file    uart_drv.c
+ * @brief   UART 驱动层：直接硬件寄存器操作，不包含业务逻辑
+ * @author  （遵循项目约定）
+ * @note    本文件所有函数操作硬件寄存器，单元测试时需替换为 mock 层
+ */
+```
 
 ---
 
