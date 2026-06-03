@@ -172,46 +172,49 @@ typedef struct {
 
 驱动模板用于组织代码，不是厂商级寄存器头文件。所有真实 offset、reserved bit、reset 值、时序和 errata 必须来自目标资料。
 
+每个外设模块按**三层五文件**组织：寄存器层（纯定义）→ 驱动层（硬件操作）→ 应用层（业务 API）。
+
 ### 4.1 统一结构
 
 ```text
 module/
-├── module_reg.h   # 寄存器结构体、位定义或 vendor wrapper
-├── module.h       # 公共接口
-└── module.c       # 实现
+├── module_reg.h    # 寄存器结构体、位定义、基地址宏 — 无 .c，无函数实现
+├── module_drv.h    # 驱动层：寄存器读写、ISR、DMA  — 不含业务逻辑、不分配 buffer
+├── module_drv.c
+├── module.h        # 应用层：缓冲管理、协议处理、对外 API — 不直写寄存器、不含 ISR
+└── module.c
 ```
 
-### 4.2 函数级接口模板
+调用链：应用层 → 驱动层 → 寄存器层。驱动层 ISR 通过函数指针回调通知应用层，不直接操作 ring buffer。
 
-以下模板展示典型驱动的公共接口设计。具体实现按 fallback 规范和目标资料生成。
+### 4.2 接口模板
 
-**UART**：`uartInit(config, handle)` → `uartDeInit` / `uartSend` / `uartRecv` / `uartSendIT` / `uartRecvIT` / `uartSendDMA` / `uartRecvDMA` / `uartIRQHandler(handle)`
+| 模块 | 驱动层 (`_drv.h`) | 应用层 (`.h`) |
+|------|-------------------|---------------|
+| UART | `uartDrvInit/DeInit/SendByte/RecvByte/EnableIRQ/IRQHandler` | `uartInit/DeInit/Send/Recv/SendIT/RecvIT/SendDMA/RecvDMA` |
+| SPI | `spiDrvInit/Transfer/SetCS/IRQHandler` | `spiInit/Transfer/SelectCS/TransferIT/TransferDMA` |
+| GPIO | `gpioDrvInit/WritePin/ReadPin/TogglePin/IRQHandler` | `gpioInit/WritePin/ReadPin/TogglePin/SetCallback` |
+| DMA | `dmaDrvChannelInit/Start/Abort/IsComplete/IRQHandler` | `dmaChannelInit/StartTransfer/AbortTransfer/IsTransferComplete` |
 
-**SPI**：`spiInit(config, handle)` → `spiTransfer(handle, tx_buf, rx_buf, len, timeout)` / `spiSelectCS(handle, active)`
+**Init 模式（驱动层）**：禁用外设 → 配置参数（值来自厂商或 PLACEHOLDER）→ 清挂起标志 → 使能 → 标记 initialized
 
-**GPIO**：`gpioInit(config, handle)` → `gpioWritePin(handle, pin, value)` / `gpioReadPin(handle, pin) → bool` / `gpioTogglePin(handle, pin)`
+**ISR 模式（驱动层）**：读 STATUS → 按 mask 分支 → 回调通知应用层 → 清中断标志 → 从不阻塞
 
-**DMA**：`dmaChannelInit(handle, channel, xfer_config)` → `dmaStartTransfer` / `dmaAbortTransfer` / `dmaIsTransferComplete` / `dmaIRQHandler`
+### 4.3 关键结构
 
-Init 实现模式：1) 禁用外设 → 2) 配置参数（值来自厂商资料或 PLACEHOLDER）→ 3) 清除挂起标志 → 4) 使能 → 5) 标记 initialized
+| 模块 | 寄存器 | 驱动层 handle | 应用层 handle |
+|------|--------|--------------|--------------|
+| UART | `DATA, STATUS, CTRL, BAUD` | `regs, rx/tx_callback` | `rx_buffer, rx_head, rx_tail, drv_handle` |
+| SPI | `CTRL, STATUS, DATA, BAUD` | `regs, cs_callback` | `drv_handle` |
+| I2C | `CTRL, STATUS, ADDR, DATA` | `regs, addr, direction` | `timeout, bus_state, drv_handle` |
+| DMA | `GLOBAL_STATUS, ch[n].CTRL/SRC/DST/LEN` | `regs, channel_cfg[]` | `buffers[], drv_handle` |
+| CAN | `CTRL, STATUS, BIT_TIMING, TX/RX_DATA` | `regs, bit_timing` | `can_msg_t{id,dlc,data[8]}, drv_handle` |
+| GPIO | `MODE, INPUT/DATA, OUTPUT_DATA, BIT_SET_RESET` | `regs, pin_map` | `pin_callbacks[], gpio_mode_t, drv_handle` |
+| Timer | `CTRL, COUNT, AUTO_RELOAD, PRESCALER` | `regs, prescaler, auto_reload` | `period, callback, drv_handle` |
+| Watchdog | `KEY, RELOAD, STATUS` | `regs, key_reg` | `timeout_ms, drv_handle` |
+| MIL-STD-1553 | `CMD, STATUS, DATA[n]` | `regs, mode` | `msg_t, drv_handle` |
 
-ISR 模式：读 STATUS → 按 mask 分支处理 → ring buffer 入队/通知任务 → 从不阻塞
-
-### 4.3 模块索引
-
-| 模块 | 寄存器 | 关键结构 |
-|------|--------|---------|
-| UART | `DATA, STATUS, CTRL, BAUD` | `config_t { base_address, baud_rate }`, `handle_t { initialized, rx_buffer, rx_head, rx_tail }` |
-| SPI | `CTRL, STATUS, DATA, BAUD` | `config_t { base_address, clock_hz, master_mode }` |
-| I2C | `CTRL, STATUS, ADDR, DATA` | 地址、方向、timeout 和 bus state 分离 |
-| DMA | `GLOBAL_STATUS, channel[n].CTRL/SRC/DST/LEN` | channel 配置、buffer ownership 分离 |
-| CAN | `CTRL, STATUS, BIT_TIMING, TX/RX_DATA` | `can_msg_t { id, dlc, data[8] }` |
-| GPIO | `MODE, INPUT/DATA, OUTPUT_DATA, BIT_SET_RESET` | `gpio_mode_t { INPUT, OUTPUT, ALT, ANALOG }` |
-| Timer | `CTRL, COUNT, AUTO_RELOAD, PRESCALER` | period、prescaler、callback 分离 |
-| Watchdog | `KEY, RELOAD, STATUS` | unlock/feed/reload 保持显式 |
-| MIL-STD-1553 | mode、cmd/status word、data words | `mil1553_mode_t { BC, RT, BM }`, `mil1553_msg_t { command_word, status_word, data_words[32] }` |
-
-反模式：不要把寄存器访问散落成 `UART_DR(base)` 等地址宏。统一结构体更容易 review、mock 和迁移。
+**反模式**：寄存器散落成地址宏、应用层直写寄存器、驱动层分配 buffer/处理协议帧、ISR 中阻塞。
 
 ---
 
