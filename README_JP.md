@@ -1,218 +1,101 @@
 # embedded-code-skill
 
-<p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT" />
-  <img src="https://img.shields.io/badge/language-C-A8B9CC?style=flat-square&logo=c&logoColor=white" alt="C" />
-  <img src="https://img.shields.io/badge/OpenAI%20Codex-412991?style=flat-square&logo=openai&logoColor=white" alt="OpenAI Codex" />
-  <img src="https://img.shields.io/badge/Claude%20Code-5678a0?style=flat-square&logo=anthropic&logoColor=white" alt="Claude Code" />
-  <img src="https://img.shields.io/badge/Cursor-7C3AED?style=flat-square&logo=cursor&logoColor=white" alt="Cursor" />
-  <img src="https://img.shields.io/static/v1?label=&message=VSCode&logo=visualstudiocode&logoColor=ffffff&color=007ACC&style=flat-square" alt="VSCode" />
-  <img src="https://img.shields.io/badge/RTOS-FreeRTOS%20%7C%20Zephyr%20%7C%20RT--Thread-orange?style=flat-square" alt="RTOS" />
-</p>
+**Embedded C コードアシスタント**: 組み込みシナリオで AI が保守的でレビュー可能なコードを出力することを支援します。
 
-> ドライバ骨格の作成、既存コードの整理、低レベルファームウェアのレビュー、RTOS ガイダンス、ビルドシステム設定に使う Embedded C コード助手。
-
-[简体中文](README.md) · [English](README_EN.md) · [日本語](README_JP.md)
+| リソース | 説明 |
+|----------|------|
+| [SKILL.md](SKILL.md) | 唯一のルールエントリーポイント |
+| [install.sh](install.sh) | インストールスクリプト |
 
 ---
 
-## このリポジトリについて
+## 何をするか
 
-このリポジトリのルール入口は `SKILL.md` だけです。
+- **REWRITE**: レガシードライバを整理、レジスタ書き込み順序とタイミングを保持
+- **REVIEW**: ISR/DMA/cache/競合リスクを監査、問題表を出力
+- **GUIDE**: RTOS タスク設計、CMake 設定、デバッグ戦略のコンサルティング
 
-`SKILL.md` は、次の作業でモデルの出力を安定させ、保守的でレビューしやすくします：
+**チップマニュアルではありません**。レジスタマップ、IRQ テーブル、認証資料の代替ではありません。
 
-- 新しい Embedded C ドライバ骨格を書く（関数レベルテンプレート付き）
-- 既存の driver、HAL/BSP、register-access code を整理する
-- ISR、DMA、cache、volatile、race、timeout、overflow のリスクをレビューする
-- RTOS タスク設計、スレッドセーフ、優先度逆転防止をガイドする
-- ビルドシステム設定（CMake クロスコンパイル、リンカスクリプト、スタートアップコード）をガイドする
-- HAL 層テストとオンターゲットデバッグ戦略をガイドする
-- リポジトリコードが本スキル規則に合致すればそのまま使用し、合致しなければ論理を変えずに規則に統一
+---
 
-これはベンダーのリファレンスマニュアル、実際のレジスタマップ、IRQ、barrier、cache/DMA ルール、タイミング要件、認証資料の代替ではありません。
+## コア原則：三層分離
+
+REWRITE/REVIEW は三層アーキテクチャに従う必要があります：
+
+```
+┌──────────────────────────────────────┐
+│  アプリ層 (module.h / module.c)     │
+│  バッファ管理、プロトコル、公開 API   │
+│  ✗ レジスタ直接書き込み禁止  ✗ ISR 禁止 │
+├──────────────────────────────────────┤
+│  ドライバ層 (module_drv.h / .c)     │
+│  レジスタ R/W、ISR、DMA             │
+│  ✗ ビジネスロジック禁止  ✗ バッファ確保禁止 │
+│  → ISR はコールバック経由で通知       │
+├──────────────────────────────────────┤
+│  レジスタ層 (module_reg.h)          │
+│  構造体、ビット定義、ベースアドレスマクロ │
+│  ✗ 関数実装禁止  ✗ ビジネスコード禁止  │
+└──────────────────────────────────────┘
+```
+
+五ファイル構成：`module_reg.h` → `module_drv.h/.c` → `module.h/.c`
 
 ---
 
 ## クイックスタート
 
 ```bash
-/ecs STM32 UART ドライバを生成、ベースアドレス 0x4000C000
-/ecs この SPI 初期化コードを整理し、レジスタ書き込み順序を保つ
-/ecs この DMA ISR の race、volatile、cache 問題をレビューする
+# REWRITE: UART ドライバを整理、レジスタ書き込み順序を保持
+/ecs この UART ドライバを三層に整理する
+
+# REVIEW: DMA ISR リスクを監査
+/ecs この DMA ISR の競合やキャッシュ問題を監査する
+
+# GUIDE: RTOS タスク設計
 /ecs FreeRTOS タスク優先度とスタックサイズを設計する
-/ecs CMake クロスコンパイル設定とリンカスクリプトを作成する
 ```
 
 ---
 
-## 作業モード
+## RED LINES（禁止事項）
 
-| モード | 用途 |
-|--------|------|
-| `REWRITE` | public behavior、ABI、register write order、timing-sensitive sequence を保って整理する |
-| `REVIEW` | finding を先に出し、correctness、hardware behavior、race、portability risk を優先する |
+1. ハードウェア事実の捏造禁止（レジスタ/IRQ/バリア/タイミング）
+2. 低レベルコードでの `malloc` / VLA 禁止
+3. 公共インターフェースでの `int`/`char`/`long` をデフォルト型として使用禁止
+4. ビジネスロジックへの裸レジスタアドレス散布禁止
+5. コンパイル不可能な出力の禁止
+6. **三層分離の違反禁止**
 
 ---
 
-## Skill アーキテクチャ
+## インストール
 
-`SKILL.md` は単一入口です（全 12 章）。構成は、request classification、repository context、work mode、subdomain rules、output contract の順に整理しています。
-
-```mermaid
-%%{init: {"flowchart": {"curve": "step"}} }%%
-flowchart TB
-    A([ユーザーリクエスト])
-    B[SKILL.md 単一入口]
-    C[Repository context を読む]
-    D[Hardware fact boundary を確認]
-    E{Select work mode}
-    G[REWRITE: behavior / ABI / register write order を保つ]
-    H[REVIEW: findings first / risk ordered]
-    J[Subdomain rules を適用]
-    K[Coding Standards]
-    L[Driver Templates]
-    M[Architecture Rules]
-    N[RTOS Guidance]
-    O[Build System]
-    P[Test & Debug]
-    Q[Industry Domains]
-    R[Final output contract]
-
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-    E --> G
-    E --> H
-    G --> J
-    H --> J
-    J --> K
-    J --> L
-    J --> M
-    J --> N
-    J --> O
-    J --> P
-    J --> Q
-    K --> R
-    L --> R
-    M --> R
-    N --> R
-    O --> R
-    P --> R
-    Q --> R
+```bash
+./install.sh          # ~/.codex/skills/embedded-code-skill/
+./install.sh cursor   # ~/.cursor/skills/embedded-code-skill/
+./install.sh claude   # ~/.claude/skills/embedded-code-skill/
 ```
 
 ---
 
-## 機能マトリクス
+## 章ナビゲーション
 
-| 章 | レイヤー | カバー範囲 |
-|----|----------|------------|
-| Ch.1 | 定位と使用原則 | タスク分類、リポジトリコンテキスト、ハードウェア事実境界、出力契約 |
-| Ch.2 | Fallback コーディング規範 | 命名、型、エラー処理、struct パターン、コメント（重複除去済み） |
-| Ch.3 | レジスタ抽象化 | 専用レジスタ定義、MASK/SHIFT マクロ、vendor/CMSIS 再利用 |
-| Ch.4 | ドライバテンプレート | UART、SPI、I2C、DMA、CAN、GPIO、Timer、Watchdog、MIL-STD-1553（関数レベル骨格付き） |
-| Ch.5 | アーキテクチャ規則 | Cortex-M、Cortex-A、ESP32/Xtensa、RP2040、NRF52、RISC-V、PowerPC、SPARC V8 |
-| Ch.6 | RTOS ガイダンス | FreeRTOS、Zephyr、RT-Thread：タスク設計、スレッドセーフ、ISR 連携、優先度逆転、デッドロック防止 |
-| Ch.7 | ビルドシステム | CMake クロスコンパイル、リンカスクリプト sections、スタートアップコード、コンパイラ属性 |
-| Ch.8 | テストとデバッグ | HAL mock パターン、アサーションレベル、オンターゲットデバッグ規約 |
-| Ch.9 | 業界ドメイン | 航空、軍事、産業安全、自動車機能安全、general embedded |
-| Ch.10 | メモリと並行性 | 動的割り当て制限、VLA 禁止、critical section、memory ordering |
-| Ch.11 | アンチパターン | 5つの典型例（レジスタ散在、キャッシュコヒーレンシ、ISR ブロック、volatile 誤用、優先度逆転） |
-| Ch.12 | チェックリストとメンテナンス | ハードウェアソース、並行性、RTOS 安全、smoke check シナリオ |
+| 章 | 内容 |
+|----|------|
+| §1 | 定位、使用原則、作業モード、RED LINES |
+| §2 | コーディング規範（命名、型、エラー処理、データ構造、コメント） |
+| §3 | レジスタ抽象化（階層的構造体、`MASK/SHIFT`） |
+| §4 | ドライバテンプレート（三層五ファイル、インターフェース仕様） |
+| §5 | アーキテクチャ規則（Cortex-M/A、ESP32、RISC-V 等） |
+| §6 | RTOS ガイダンス（FreeRTOS/Zephyr/RT-Thread） |
+| §7 | ビルドシステム（リンカスクリプト、CMake） |
+| §8 | テストとデバッグ |
+| §9 | 業界ドメイン（航空/軍事/産業/自動車） |
+| §10-12 | メモリと並行性、アンチパターン、レビューチェックリスト |
 
----
-
-## コアルール
-
-| 分類 | ルール |
-|------|--------|
-| 規則統一 | リポジトリコードが本スキルの規則に合致すればそのまま使用し、合致しなければ論理を変えずに規則に合わせて修正 |
-| ハードウェア事実 | register offset、bit field、reset value、IRQ、barrier、timing を捏造しない |
-| 出力形式 | rewrite、review それぞれに固定の出力形を使う |
-| 型 | public interface では固定幅整数と `bool` を優先する |
-| エラー処理 | プロジェクトに規約がない場合のみ `embedded_code_status_t` を使う |
-| レジスタアクセス | 専用定義または既存の vendor/CMSIS 構造体を使う |
-| メモリ | 低レベルドライバでは動的確保と VLA をデフォルトで避ける |
-| 並行性 | ISR、DMA、cache、critical section、memory ordering は保守的に扱う |
-| RTOS 安全 | ISR 内でブロック禁止、FromISR API 使用、共有データは同期プリミティブで保護 |
-
----
-
-## 子領域のカバー範囲
-
-`SKILL.md` には、次の子領域ルールを直接組み込んでいます（全 12 章）。別ディレクトリには分けていません。
-
-### Coding Standards（Ch.2）
-
-- 命名、pointer naming、固定幅型、`bool`
-- fallback status type: `embedded_code_status_t`（`VALIDATE_NOT_NULL` と `VALIDATE_INIT` 付き）
-- config struct、runtime handle、state enum の構成
-- magic number、buffer size、timeout、retry count、コメント、review checklist
-
-### Register Abstraction（Ch.3）
-
-- 周辺ブロックごとに専用 `*_reg.h`
-- `*_REG` で統一アクセス、ビットフィールドは `MASK/SHIFT` マクロ
-- ビジネスロジックに裸のレジスタアドレスを散在させない
-
-### Driver Templates（Ch.4）
-
-- 共通構成: `*_reg.h`、`*_reg_t`、`*_REG`、`MASK/SHIFT`
-- **関数レベル骨格**: UART/SPI/GPIO/DMA の初期化、転送、ISR handler の完全パターン
-- UART、SPI、I2C、DMA、CAN、GPIO、Timer、Watchdog、MIL-STD-1553 をカバー
-- template は構成例であり、実際の offset、reserved bit、reset value、errata は対象資料に従う
-
-### Architecture Rules（Ch.5）
-
-- ISR、barrier、DMA、cache、interrupt controller、SMP、memory ordering、CSR/SPR をカバー
-- Cortex-M、Cortex-A、**ESP32/Xtensa**、**RP2040 デュアルコア**、**NRF52**、RISC-V、PowerPC、SPARC V8 の quick ref を含む
-- ESP32 固有パターン: `IRAM_ATTR`、`FromISR` API、デュアルコア負荷分散、高レベル SPI API
-- RP2040 固有パターン: Pico SDK、デュアルコア FIFO、DMA チャネル割り当て
-- NRF52 固有パターン: nrfx ドライバ層、GPIOTE コールバック、SoftDevice 優先度
-- 未知アーキテクチャでは資料を要求し、確認できない場合は architecture-neutral skeleton と placeholder に留める
-
-### RTOS Guidance（Ch.6）
-
-- FreeRTOS、Zephyr、RT-Thread API 比較表
-- タスク設計: スタックサイズ、優先度、作成順序、ウォッチドッグ
-- スレッドセーフデータ共有: ミューテックス、キュー、アトミック操作
-- ISR と RTOS の連携: ブロック禁止、FromISR API 使用、短く高速に
-- 優先度逆転防止: 優先度継承ミューテックス
-- デッドロック防止: 固定ロック順序、タイムアウト付き待機
-
-### Build System（Ch.7）
-
-- リンカスクリプト: `.text`、`.rodata`、`.data` 再配置、`.bss` ゼロクリア
-- スタートアップコード: データコピー、bss クリア、SystemInit、main 呼び出し順序
-- コンパイラ属性: `interrupt`、`section`、`aligned`、`weak`、`always_inline`
-- CMake クロスコンパイルテンプレート
-
-### Test & Debug（Ch.8）
-
-- HAL mock パターン: 関数ポインタテーブルによる交換可能な HAL
-- アサーションレベル: `STATIC_ASSERT`、`ASSERT`、`SOFT_ASSERT`
-- オンターゲットデバッグ: デバッグピン、エラーコード追跡、スタックオーバーフロー検出、ウォッチドッグ、ログレベル
-
-### Industry Domains（Ch.9）
-
-- Aerospace / DO-178C、Military / MIL-STD、Industrial / IEC 61508、Automotive / ISO 26262、General Embedded をカバー
-- 各ドメインにデフォルト要件（動的割り当て禁止、safe state、インタフェース分離など）があるが、DAL/ASIL/SIL レーティングは汎用デフォルトとして扱わない
-
----
-
-## パッケージ構成
-
-```text
-embedded-code-skill/
-├── SKILL.md       # 唯一のルール入口
-├── install.sh     # インストールスクリプト
-├── LICENSE        # MIT ライセンス
-├── README.md      # 中国語 readme
-├── README_EN.md   # 英語 readme
-└── README_JP.md   # 日本語 readme
-```
+詳細は [SKILL.md](SKILL.md) を参照してください。
 
 ---
 

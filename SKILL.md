@@ -1,6 +1,7 @@
 ---
+version: 1.0.0
 name: embedded-code-skill
-description: "嵌入式 C 代码助手：旧代码整理、低层固件审查、RTOS/构建系统/调试指导"
+description: "嵌入式 C 的 REWRITE/REVIEW/GUIDE：三层整理、低层审查、RTOS/构建咨询。硬件参数须有出处。"
 command: ecs
 user-invocable: true
 triggers:
@@ -42,37 +43,48 @@ triggers:
 
 ### 1.1 定位
 
-帮助处理嵌入式 C 代码：驱动骨架生成、旧代码整理、代码审查、RTOS/构建系统/调试指导。
+帮助处理嵌入式 C 代码：旧代码整理（**REWRITE**）、低层固件审查（**REVIEW**）、RTOS/构建/调试指导。
 
-本 skill 提供**不绑定某个 IDE 或 agent 的保守编码规范**。任何真实寄存器偏移、位定义、reset 值、IRQ 号、时序限制、cache/DMA 规则和屏障要求，都必须来自目标芯片参考手册、厂商头文件、现有代码或用户提供的资料——**不编造硬件事实**。
+本 skill 提供不绑定 IDE/agent 的保守编码规范。寄存器偏移、位定义、IRQ、屏障、cache/DMA、时序等须来自手册、厂商头文件或仓库——**不编造硬件事实**。
 
 ### 1.2 使用原则
 
-1. 先判断任务类型：`REWRITE` 或 `REVIEW`。
-2. 先读目标仓库的头文件、宏、状态类型、命名、include 顺序、vendor SDK、编译开关和已有驱动样例。
-3. **规范统一**：仓库已有代码若符合本 skill 规范则直接沿用；若不符合，在不改变原逻辑的前提下修改为符合本 skill 规范的写法。项目已使用 CMSIS 或厂商寄存器结构体时，基于它们生成代码，不要为了 fallback 再包一层。
-4. **不编造硬件事实**：信息缺失时先说明缺口；若必须继续，使用清晰标注的 placeholder。
-5. 输出便于 IDE 采用：优先给小补丁、限定代码块、文件/行号 findings 或明确的复制目标；除非用户明确要求大重写，不整文件替换。
-6. 风格问题排在 correctness、硬件行为、安全性、并发和可移植风险之后。
+1. 先判 `REWRITE`/`REVIEW`/`GUIDE`（§1.4）→ 读仓库头文件、命名、SDK、已有驱动样例
+2. 遵守 §4 三层架构（reg → drv → app；ISR 回调通知 app）
+3. 项目规范优先；CMSIS/厂商结构体直接复用，不为 fallback 再包一层
+4. 硬件信息缺口先列出；待定值标 placeholder
+5. 输出优先 patch；风格让位于 correctness/并发/硬件风险
 
-### 1.3 生成前必须确认的信息
+### 1.3 前置信息
 
 | 信息 | 要求 | 示例 |
 |------|------|------|
-| 外设/模块名 | 必需 | `uart`, `spi`, `gpio`, `dma` |
+| 外设/模块名 | REWRITE 必需 | `uart`, `spi`, `gpio`, `dma` |
 | 硬件来源 | 强烈建议 | 参考手册章节、厂商头文件、现有驱动 |
 | 芯片或架构 | 强烈建议 | `STM32F4`, `Cortex-M4`, `ESP32` |
 | 基地址/位定义 | 生产代码必需 | `UART_BASE_ADDR = 0x4000C000U` |
-| 项目约定 | 生成或重写前读取 | status type、命名、SDK、build macros |
+| 项目约定 | 重写前读取 | status type、命名、SDK、build macros |
 | RTOS（如适用） | 驱动层需确认 | FreeRTOS、Zephyr、RT-Thread、裸机 |
 
-缺少生产级硬件信息时，可以生成保守骨架，但必须标注 `USER_PROVIDED`、`REPO_DERIVED` 或 `PLACEHOLDER`。
+缺口先列出；待定值标 `USER_PROVIDED` / `REPO_DERIVED` / `PLACEHOLDER`。
+
+### 1.4 工作模式
+
+**REWRITE**：保留 public API、ABI、寄存器写入顺序与时序序列；按 §4 整理类型/命名/分层。输出：简述 → 缺口 → patch（必要时文件布局）。workaround 标 `/* 有意保留：原因 */`。
+
+**REVIEW**：不产出代码。按寄存器抽象 → 分层/ISR/同步 → volatile/barrier/cache/DMA → 错误处理/内存 顺序查。输出表：`| P0/P1/P2 | 位置 | 问题 | 建议 |`（P0 行为/安全，P1 并发/可移植，P2 风格）。
+
+**GUIDE**：无代码整理/审查需求（RTOS 任务设计、CMake/链接脚本、调试策略等）。按 §5–§9 给建议或示例片段，不走 REVIEW 表。
+
+### 1.5 RED LINES
+
+禁伪造硬件参数；禁低层 `malloc`/VLA；禁公共接口用 `int`/`char`/`long`；禁业务代码裸寄存器地址；禁不可编译输出；**禁违反三层解耦（reg/drv/app 分层，ISR 回调通知 app）**。
 
 ---
 
 ## 2. Fallback 编码规范
 
-仅当目标仓库没有更强约定时使用。仓库已有代码若符合本规范则沿用，不符合则在不改变逻辑的前提下修改为符合本规范的写法。
+仓库无更强约定时适用；符合则沿用，不符合则不改逻辑地统一。
 
 ### 2.1 命名
 
@@ -95,42 +107,46 @@ triggers:
 
 ```c
 typedef enum {
-    EmbedCode_Ok          =  0,
-    EmbedCode_ErrNullPtr  = -1,
+    EmbedCode_Ok           =  0,
+    EmbedCode_ErrNullPtr   = -1,
     EmbedCode_ErrInvalidArg = -2,
-    EmbedCode_ErrTimeout  = -3,
-    EmbedCode_ErrBusy     = -4,
-    EmbedCode_ErrNotInit  = -5,
+    EmbedCode_ErrTimeout   = -3,
+    EmbedCode_ErrBusy      = -4,
+    EmbedCode_ErrNotInit   = -5,
 } embedded_code_status_t;
 
 #define VALIDATE_NOT_NULL(ptr) \
     do { if ((ptr) == NULL) return EmbedCode_ErrNullPtr; } while (0)
 
 #define VALIDATE_INIT(handle) \
-    do { if ((handle) == NULL || !(handle)->initialized) return EmbedCode_ErrNotInit; } while (0)
+    do { if (!(handle) || !(handle)->initialized) return EmbedCode_ErrNotInit; } while (0)
 ```
 
-### 2.3 结构体模式
+### 2.3 数据结构
+
+重写或修改时：状态/错误/标志 → `enum`；配置/上下文 → `struct`；>3 标量参数 → 结构体指针；位域用 `MASK` 宏，禁裸魔数。
+
+### 2.3.1 结构体模式
 
 默认拆成配置、运行时句柄和状态：
 
 ```c
 typedef struct {
-    uint32_t base_address;  /* 外设基地址 */
-    uint32_t baud_rate;     /* 波特率 */
+    uint32_t base_address;
+    uint32_t baud_rate;
 } uart_config_t;
 
 typedef struct {
-    bool initialized;           /* 初始化标志 */
-    volatile bool tx_busy;      /* 发送忙标志（ISR 写） */
-    uint8_t *rx_buffer;         /* 接收环形缓冲区 */
-    uint16_t rx_head;           /* 环形缓冲区写位置 */
-    uint16_t rx_tail;           /* 环形缓冲区读位置 */
-    uart_config_t config;       /* 配置参数 */
+    bool            initialized;
+    volatile bool   tx_busy;
+    uint8_t        *rx_buffer;
+    uint16_t        rx_head;
+    uint16_t        rx_tail;
+    uart_config_t   config;
 } uart_handle_t;
 
 typedef enum {
-    UART_STATE_IDLE      = 0,
+    UART_STATE_IDLE = 0,
     UART_STATE_TX_BUSY,
     UART_STATE_RX_ACTIVE,
     UART_STATE_ERROR,
@@ -145,11 +161,14 @@ typedef enum {
 - 注释解释硬件原因、约束、时序和意图；不要逐行复述代码。
 - 注释应回答"为什么"而非"是什么"——代码本身说明"是什么"，注释补充"为什么这样写"。
 - 保持注释与代码同步更新；过时注释比无注释更有害。
+- **寄存器层注释要详细**：每个寄存器必须标注偏移地址 `/* 0xNN */`、位域含义 `bit[n]=功能`、读写属性。底层代码是硬件交互的唯一依据，注释不够详细会导致后续维护者误操作。
+- **应用层注释侧重意图**：说明业务目的、调用约束、错误处理策略，不需要重复底层已有的位域信息。
 
 #### 2.4.2 必须注释的场景
 
 | 场景 | 说明 | 示例 |
 |------|------|------|
+| **操作步骤** | 驱动层和应用层函数体内的关键步骤必须用编号注释标注操作顺序 | 见下方示例 |
 | 硬件约束 | 寄存器写入顺序、时序要求、errata workaround | `/* 必须先写 CTRL 再写 DATA，否则 FIFO 错位（Errata 3.2） */` |
 | 非显而易见的逻辑 | 算法选择原因、特殊边界处理 | `/* 使用查表法而非计算，节省 12 个 CPU 周期 */` |
 | 临时方案 | workaround、TODO、待确认项 | `/* FIXME: 临时绕过芯片 Rev.A 的 DMA 冻结问题 */` |
@@ -157,53 +176,67 @@ typedef enum {
 | 并发/中断相关 | critical section、屏障、volatile 使用原因 | `/* 关中断保护 tx_tail，ISR 中会修改 */` |
 | 魔数来源 | 非自明的常量值来源 | `/* 1200 = 72MHz / (16 * 3750)，参考手册 §23.4.2 */` |
 
+**操作步骤注释要求（驱动层 + 应用层均适用）：**
+
+驱动层函数和应用层函数体内，每个关键操作步骤必须用编号注释标注，让读者不用看手册也能理解操作流程：
+
+```c
+embedded_code_status_t uartDrvInit(uart_drv_handle_t *p_handle, const uart_config_t *p_config)
+{
+    /* Step 1: 参数校验 */
+    VALIDATE_NOT_NULL(p_handle);
+    VALIDATE_NOT_NULL(p_config);
+
+    /* Step 2: 禁用 UART，避免配置过程中产生意外中断 */
+    UART_REG->ctrl.CTRL &= ~UART_CTRL_ENABLE_MASK;
+
+    /* Step 3: 配置波特率（值来自参考手册 §23.4.2 公式） */
+    UART_REG->ctrl.BAUD = calcBaudDiv(p_config->baud_rate);
+
+    /* Step 4: 清除挂起状态和 FIFO 残留数据 */
+    UART_REG->status.STATUS = 0U;
+
+    /* Step 5: 使能外设，标记初始化完成 */
+    UART_REG->ctrl.CTRL |= UART_CTRL_ENABLE_MASK;
+    p_handle->initialized = true;
+    return EmbedCode_Ok;
+}
+```
+
+应用层同理：`Step 1: 参数校验` → `Step 2: 填充驱动配置` → `Step 3: 调用驱动层` → `Step 4: 初始化缓冲区和状态`。
+
 #### 2.4.3 注释格式
 
 **函数注释**（公共 API 必须有，静态辅助函数酌情）：
 
 ```c
 /**
- * @brief  初始化 UART 外设并配置波特率
- * @param  handle  UART 句柄指针，调用前需填充 config 字段
- * @param  baud    目标波特率（支持 9600 / 115200 / 921600）
- * @return EmbedCode_Ok 成功；EmbedCode_ErrNullPtr handle 为空；
- *         EmbedCode_ErrInvalidArg 波特率不支持
+ * @brief  初始化 UART 并配置波特率
+ * @param  handle  句柄指针，调用前需填充 config
+ * @param  baud    目标波特率
+ * @return EmbedCode_Ok 成功；EmbedCode_ErrNullPtr / EmbedCode_ErrInvalidArg
  * @note   调用前需确保 GPIO 已配置为 AF 模式
- * @note   本函数会禁用 UART 后重新配置，不保留当前状态
  */
 embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud);
 ```
 
-**内联注释**（关键行上方或同行）：
+**内联注释**：关键行上方或同行，解释原因而非复述代码。
 
 ```c
-/* 等待发送完成，超时防止硬件死锁（参考手册建议 ≥1ms） */
 uint32_t timeout = UART_TX_TIMEOUT_MS;
-while (!(UART_REG->STATUS & UART_SR_TX_EMPTY) && --timeout) {
-    /* 空等：ISR 模式下此循环不应执行，保留作为 safety net */
+while (!(UART_REG->status.STATUS & UART_STATUS_TX_EMPTY) && --timeout) {
+    /* 等待发送完成，超时防硬件死锁 */
 }
 ```
 
-**结构体/枚举注释**：
+**结构体/寄存器注释**：字段含义非自明时才加，寄存器字段标注偏移和位域。
 
 ```c
 typedef struct {
-    uint8_t *rx_buffer;     /* 接收环形缓冲区，由应用层分配，驱动层不管理生命周期 */
-    uint16_t rx_head;       /* ISR 写入位置（volatile），主循环只读 */
-    uint16_t rx_tail;       /* 主循环读取位置，ISR 只读 */
-    volatile bool tx_busy;  /* 发送忙标志，ISR 在发送完成时清零 */
+    uint8_t *rx_buffer;     /* 应用层分配，驱动层不管理生命周期 */
+    uint16_t rx_head;       /* ISR 写入位置，主循环只读 */
+    volatile bool tx_busy;  /* ISR 在发送完成时清零 */
 } uart_handle_t;
-```
-
-**寄存器注释**：
-
-```c
-typedef struct {
-    volatile uint32_t CTRL;    /* 0x00 控制寄存器：bit[0]=EN, bit[2:1]=MODE, bit[4]=IE */
-    volatile uint32_t STATUS;  /* 0x04 状态寄存器：bit[0]=TX_EMPTY, bit[1]=RX_FULL, bit[3]=ERR */
-    const  uint32_t RESERVED0[2];
-    volatile uint32_t DATA;    /* 0x10 数据寄存器：写=TX FIFO，读=RX FIFO */
-} uart_reg_t;
 ```
 
 #### 2.4.4 标记约定
@@ -212,38 +245,29 @@ typedef struct {
 
 | 标记 | 含义 | 何时移除 |
 |------|------|----------|
-| `USER_PROVIDED` | 需用户填入真实硬件值 | 用户提供信息后 |
-| `PLACEHOLDER` | 临时占位值，功能正确但不完整 | 硬件信息确认后 |
-| `REPO_DERIVED` | 从仓库现有代码推导，可能不准确 | 对照手册验证后 |
-| `TODO:` | 待实现或待优化的功能 | 功能完成或优化后 |
-| `FIXME:` | 已知缺陷或临时 workaround | 缺陷修复后 |
-| `HACK:` | 依赖特定版本/硬件行为的临时方案 | 正式方案实现后 |
-| `NOTE:` | 重要但非显而易见的说明 | 永久保留 |
-| `WARNING:` | 潜在风险点，错误修改可能导致硬件损坏 | 永久保留 |
-| `OPTIMIZE:` | 已验证正确的候选优化点 | 优化实施后 |
+| `USER_PROVIDED` | 需用户填入真实硬件值 | 用户提供后 |
+| `PLACEHOLDER` | 临时占位，功能正确但不完整 | 硬件确认后 |
+| `REPO_DERIVED` | 从仓库推导，可能不准确 | 对照手册后 |
+| `TODO:` | 待实现或待优化 | 完成后 |
+| `FIXME:` | 已知缺陷或临时 workaround | 修复后 |
+| `HACK:` | 依赖特定版本/硬件的临时方案 | 正式方案后 |
+| `NOTE:` | 重要说明 | 永久保留 |
+| `WARNING:` | 风险点，误改可能损坏硬件 | 永久保留 |
+| `OPTIMIZE:` | 已验证的优化候选 | 实施后 |
 
-使用示例：
-
-```c
-/* NOTE: 此函数不在 ISR 上下文中调用，无重入风险 */
-/* WARNING: 修改 BAUD 寄存器值可能导致正在进行的传输损坏 */
-/* FIXME: Rev.A 芯片需要额外 2 个 NOP 等待 FIFO 稳定，Rev.B 后移除 */
-/* USER_PROVIDED: 根据实际外部晶振频率填入 PLL 分频系数 */
-/* PLACEHOLDER: 当前使用 115200，最终波特率由系统设计决定 */
-/* HACK: 依赖 FreeRTOS v10.4+ 的 xQueueOverwriteFromISR，低版本需改用方案 B */
-```
+用法：`/* FIXME: Rev.A 芯片需额外 2 个 NOP 等待 FIFO 稳定 */`
 
 #### 2.4.5 文件头注释
 
-- Doxygen 文件头只在项目已有模式时添加。
-- 若项目需要文件头，格式如下：
+- Doxygen 文件头只在项目已有模式时添加。若需要：
 
 ```c
 /**
  * @file    uart_drv.c
- * @brief   UART 驱动层：直接硬件寄存器操作，不包含业务逻辑
- * @author  （遵循项目约定）
- * @note    本文件所有函数操作硬件寄存器，单元测试时需替换为 mock 层
+ * @brief   UART 驱动层：寄存器操作，不含业务逻辑
+ * @author  Your Name
+ * @date    2024-01-01
+ * @note    单元测试时需替换为 mock 层
  */
 ```
 
@@ -251,32 +275,54 @@ typedef struct {
 
 ## 3. 寄存器抽象
 
-- 每个外设 block 一个独立 `*_reg.h`，使用 `*_reg_t` 寄存器结构体或复用 vendor/CMSIS 已有结构体
+- 每个外设 block 一个独立 `*_reg.h`，使用分层 `*_reg_t` 寄存器结构体或复用 vendor/CMSIS 已有结构体
+- **分层规则**：功能模块独立子结构体（`*_mod_reg_t`），顶层按偏移组合；间隙用 `uint8_t reserved[n]` 或占位 `volatile uint32_t` 填充
+- 每个寄存器用 `/* 0xNN */` 标注偏移地址，便于对照手册 review
 - 一个明确入口访问寄存器（`*_REG` 或项目已有 wrapper），位字段使用 `MASK/SHIFT` 宏
 - 不把裸寄存器地址写散在业务逻辑里
 - 对 read-modify-write、reserved bits、write-one-to-clear、unlock sequence 保持谨慎
 
 ```c
+/* ========== spi_reg.h ========== */
 #define SPI_BASE_ADDR  (0xA0010000U)
 
+/* 功能模块：控制与配置 */
 typedef struct {
-    volatile uint32_t CTRL;    /* 控制寄存器 */
-    volatile uint32_t STATUS;  /* 状态寄存器 */
-    volatile uint32_t DATA;    /* 数据寄存器 */
+    volatile uint32_t CTRL;       /* 0x00 控制寄存器：bit[0]=EN, bit[2:1]=MODE, bit[3]=IE */
+    volatile uint32_t MODE;       /* 0x04 模式寄存器：bit[0]=CPOL, bit[1]=CPHA */
+    volatile uint32_t BAUD;       /* 0x08 波特率分频寄存器 */
+    volatile uint32_t RESERVED0;  /* 0x0C 保留，仅作偏移占位，通常不访问 */
+} spi_ctrl_reg_t;
+
+/* 功能模块：状态与中断 */
+typedef struct {
+    volatile uint32_t STATUS;     /* 0x10 状态寄存器：bit[0]=TX_EMPTY, bit[1]=RX_FULL, bit[2]=BUSY */
+    volatile uint32_t INT_EN;     /* 0x14 中断使能：bit[0]=TX_CPLT_IE, bit[1]=RX_CPLT_IE */
+} spi_status_reg_t;
+
+/* 功能模块：数据 */
+typedef struct {
+    volatile uint32_t DATA;       /* 0x18 数据寄存器：写入=TX FIFO，读取=RX FIFO */
+} spi_data_reg_t;
+
+/* 顶层：按偏移组合各功能模块 */
+typedef struct {
+    spi_ctrl_reg_t   ctrl;    /* 0x00 - 0x0F 控制与配置 */
+    spi_status_reg_t status;  /* 0x10 - 0x17 状态与中断 */
+    spi_data_reg_t   data;    /* 0x18 - 0x1B 数据 */
 } spi_reg_t;
 
 #define SPI_CTRL_EN_MASK    (1U << 0)
-#define SPI_CTRL_MODE_MASK  (3U << 2)
+#define SPI_CTRL_MODE_MASK  (3U << 1)
 #define SPI_REG  ((spi_reg_t *)SPI_BASE_ADDR)
+/* SPI_REG->ctrl.CTRL |= SPI_CTRL_EN_MASK; */
 ```
 
 ---
 
 ## 4. 驱动模板
 
-驱动模板用于组织代码，不是厂商级寄存器头文件。所有真实 offset、reserved bit、reset 值、时序和 errata 必须来自目标资料。
-
-每个外设模块按**三层五文件**组织：寄存器层（纯定义）→ 驱动层（硬件操作）→ 应用层（业务 API）。
+模板仅示组织方式；offset/reset/errata 须来自目标资料。三层五文件：reg（纯定义）→ drv（寄存器/ISR/DMA）→ app（缓冲/协议/API）。
 
 ### 4.1 统一结构
 
@@ -295,10 +341,12 @@ module/
 
 | 模块 | 驱动层 (`_drv.h`) | 应用层 (`.h`) |
 |------|-------------------|---------------|
-| UART | `uartDrvInit/DeInit/SendByte/RecvByte/EnableIRQ/IRQHandler` | `uartInit/DeInit/Send/Recv/SendIT/RecvIT/SendDMA/RecvDMA` |
-| SPI | `spiDrvInit/Transfer/SetCS/IRQHandler` | `spiInit/Transfer/SelectCS/TransferIT/TransferDMA` |
-| GPIO | `gpioDrvInit/WritePin/ReadPin/TogglePin/IRQHandler` | `gpioInit/WritePin/ReadPin/TogglePin/SetCallback` |
+| UART | `uartDrvInit/DeInit/SendByte/RecvByte/EnableIRQ/RegisterCallbacks/StartDmaTx/StartDmaRx/IRQHandler` | `uartInit/DeInit/Send/Recv/SendIT/RecvIT/SendDMA/RecvDMA` |
+| SPI | `spiDrvInit/Transfer/SetCS/EnableIRQ/RegisterCallback/StartDmaTransfer/IRQHandler` | `spiInit/Transfer/SelectCS/TransferIT/TransferDMA` |
+| GPIO | `gpioDrvInit/WritePin/ReadPin/TogglePin/EnableIRQ/RegisterCallback/IRQHandler` | `gpioInit/WritePin/ReadPin/TogglePin/SetCallback` |
 | DMA | `dmaDrvChannelInit/Start/Abort/IsComplete/IRQHandler` | `dmaChannelInit/StartTransfer/AbortTransfer/IsTransferComplete` |
+
+app 的 IT/DMA 只编排缓冲与回调，委托 drv，不直写寄存器、不实现 ISR。
 
 **Init 模式（驱动层）**：禁用外设 → 配置参数（值来自厂商或 PLACEHOLDER）→ 清挂起标志 → 使能 → 标记 initialized
 
@@ -306,19 +354,21 @@ module/
 
 ### 4.3 关键结构
 
-| 模块 | 寄存器 | 驱动层 handle | 应用层 handle |
-|------|--------|--------------|--------------|
-| UART | `DATA, STATUS, CTRL, BAUD` | `regs, rx/tx_callback` | `rx_buffer, rx_head, rx_tail, drv_handle` |
-| SPI | `CTRL, STATUS, DATA, BAUD` | `regs, cs_callback` | `drv_handle` |
-| I2C | `CTRL, STATUS, ADDR, DATA` | `regs, addr, direction` | `timeout, bus_state, drv_handle` |
-| DMA | `GLOBAL_STATUS, ch[n].CTRL/SRC/DST/LEN` | `regs, channel_cfg[]` | `buffers[], drv_handle` |
-| CAN | `CTRL, STATUS, BIT_TIMING, TX/RX_DATA` | `regs, bit_timing` | `can_msg_t{id,dlc,data[8]}, drv_handle` |
-| GPIO | `MODE, INPUT/DATA, OUTPUT_DATA, BIT_SET_RESET` | `regs, pin_map` | `pin_callbacks[], gpio_mode_t, drv_handle` |
-| Timer | `CTRL, COUNT, AUTO_RELOAD, PRESCALER` | `regs, prescaler, auto_reload` | `period, callback, drv_handle` |
-| Watchdog | `KEY, RELOAD, STATUS` | `regs, key_reg` | `timeout_ms, drv_handle` |
-| MIL-STD-1553 | `CMD, STATUS, DATA[n]` | `regs, mode` | `msg_t, drv_handle` |
+寄存器列按 `模块.寄存器` 格式表示分层访问（如 `ctrl.CTRL`）。
 
-**反模式**：寄存器散落成地址宏、应用层直写寄存器、驱动层分配 buffer/处理协议帧、ISR 中阻塞。
+| 模块 | 寄存器（功能模块.寄存器） | 驱动层 handle | 应用层 handle |
+|------|--------------------------|--------------|--------------|
+| UART | `ctrl.CTRL/BAUD, fifo.DATA, status.STATUS, int.INT_EN` | `regs, rx/tx_callback` | `rx_buffer, rx_head, rx_tail, drv_handle` |
+| SPI | `ctrl.CTRL/MODE/BAUD, status.STATUS/INT_EN, data.DATA` | `regs, cs_callback` | `drv_handle` |
+| I2C | `ctrl.CTRL, addr.ADDR, fifo.DATA, status.STATUS` | `regs, addr, direction` | `timeout, bus_state, drv_handle` |
+| DMA | `global.STATUS, ch[n].CTRL/SRC/DST/LEN` | `regs, channel_cfg[]` | `buffers[], drv_handle` |
+| CAN | `ctrl.CTRL/BIT_TIMING, status.STATUS, fifo.TX/RX_DATA` | `regs, bit_timing` | `can_msg_t{id,dlc,data[8]}, drv_handle` |
+| GPIO | `mode.MODE, input.DATA, output.DATA/BSR` | `regs, pin_map` | `pin_callbacks[], gpio_mode_t, drv_handle` |
+| Timer | `ctrl.CTRL, count.COUNT, reload.AUTO_RELOAD/PRESCALER` | `regs, prescaler, auto_reload` | `period, callback, drv_handle` |
+| Watchdog | `ctrl.KEY/RELOAD, status.STATUS` | `regs, key_reg` | `timeout_ms, drv_handle` |
+| MIL-STD-1553 | `ctrl.CMD, status.STATUS, data.DATA[n]` | `regs, mode` | `msg_t, drv_handle` |
+
+**反模式**：寄存器散落成地址宏、应用层直写寄存器、驱动层分配 buffer/处理协议帧、ISR 中阻塞、顶层结构体用扁平字段不分功能模块。
 
 ---
 
@@ -334,8 +384,8 @@ module/
 | ARM Cortex-A | `dmb ish` | GIC | system registers | i.MX6/7, STM32MP |
 | RISC-V | `fence` | PLIC/CLINT | `csrr` | FE310, CH32V |
 | ESP32 (Xtensa) | `esp_cpu_dsb()` | INT matrix | `WSR`/`RSR` | ESP32, S2/S3 |
-| PowerPC | `msync` | PIC | `mfspr` | MPC5748 |
-| SPARC V8 | `stbar` | INTC | `rd psr` | LEON |
+| PowerPC | `msync` /* PLACEHOLDER: 确认 `sync` vs `msync` 差异 */ | PIC | `mfspr` | MPC5748 |
+| SPARC V8 | `stbar` /* PLACEHOLDER: 可能需补充 `set`/`lda` 完整性 */ | INTC | `rd psr` | LEON |
 
 ### 5.2 ESP32 关键差异
 
@@ -361,7 +411,7 @@ module/
 
 1. 根据芯片、工具链、vendor headers 和已有低层代码判断架构
 2. 不确定时查官方文档或要求用户提供资料
-3. 不能确认时，只生成架构无关 C 骨架，barrier/interrupt/cache maintenance 标成 placeholder
+3. 不能确认时，只给出架构无关的审查建议或保守改写，barrier/interrupt/cache maintenance 标成 placeholder
 4. 不猜测 barrier、cache maintenance、DMA ownership、IRQ number 或 interrupt-controller 行为
 
 ---
@@ -377,17 +427,15 @@ module/
 | 创建顺序 | 先创建同步原语，再创建使用它们的任务 |
 | 看门狗 | 长期阻塞任务必须有喂狗机制 |
 
-### 6.2 线程安全数据共享
+### 6.2 线程安全
 
 - **任务间**：互斥量保护（`osMutexAcquire/Release`）
 - **ISR→任务**：队列（FreeRTOS `xQueueSendFromISR` + `portYIELD_FROM_ISR`）
 - **简单标志**：`<stdatomic.h>` 原子操作或 `volatile` + 显式 barrier
 
-### 6.3 ISR 与 RTOS 交互
+### 6.3 ISR 规则
 
-- **禁止阻塞**：ISR 中绝不调用 `osDelay()`、`osMutexAcquire()` 等
-- **使用 FromISR**：FreeRTOS 中必须用 `...FromISR()` 后缀 API
-- **短且快**：ISR 只做读状态、清标志、通知任务、触发 DMA
+ISR 禁阻塞；FreeRTOS 用 `...FromISR()`；只做读状态、清标志、通知、触发 DMA。
 
 ### 6.4 常用 API 对照
 
@@ -456,8 +504,8 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-T${CMAKE_SOURCE_DIR}/linker.ld -Wl,--gc-sectio
 
 ```c
 typedef struct {
-    void    (*init)(const config_t *);
-    status_t (*send)(const uint8_t *, uint16_t);
+    embedded_code_status_t (*init)(const uart_config_t *);
+    embedded_code_status_t (*send)(const uint8_t *, uint16_t);
 } uart_hal_t;
 ```
 
@@ -494,7 +542,7 @@ typedef struct {
 
 ---
 
-## 10. 内存、安全和并发默认值
+## 10. 内存与并发
 
 - 低层驱动、ISR 和 hot path 默认不用 `malloc/free/calloc/realloc`
 - 禁止 VLA；缓冲区大小、timeout、retry count 使用命名常量
@@ -506,11 +554,13 @@ typedef struct {
 
 ## 11. 反例集
 
-**1. 寄存器散落**：❌ `#define SPI_CTRL_ADDR (*(volatile uint32_t*)0xA0010000U)` + 魔法数字 → ✅ `SPI_REG->CTRL = SPI_CTRL_INIT_VAL`
+**1. 寄存器散落**：❌ `#define SPI_CTRL_ADDR (*(volatile uint32_t*)0xA0010000U)` + 魔法数字 → ✅ `SPI_REG->ctrl.CTRL = SPI_CTRL_INIT_VAL`
 
-**2. DMA cache coherency**：❌ 直接 DMA 读写无 cache 处理 → ✅ `SCB_InvalidateDCache_by_Addr()` 或放 non-cacheable section
+**1b. 扁平寄存器结构体**：❌ `typedef struct { volatile uint32_t CTRL; volatile uint32_t STATUS; ... } uart_reg_t;` → ✅ 按功能模块分层：`uart_ctrl_reg_t`、`uart_fifo_reg_t`、`uart_status_reg_t` 组合成 `uart_reg_t`
 
-**3. ISR 阻塞**：❌ `osSemaphoreAcquire(uart_sem, osWaitForever)` → ✅ `xSemaphoreGiveFromISR()` + `portYIELD_FROM_ISR()`
+**2. DMA cache coherency**：❌ 直接 DMA 读写无 cache 处理 → ✅ 按架构处理：Cortex-M7/M33 等带 D-Cache 可用 `SCB_CleanDCache_by_Addr` / `SCB_InvalidateDCache_by_Addr`；无 cache 或不确定时放 non-cacheable section 并标注 `PLACEHOLDER`
+
+**3. ISR 阻塞**：❌ ISR 内 `xSemaphoreTake(..., portMAX_DELAY)` → ✅ `xSemaphoreGiveFromISR()` + `portYIELD_FROM_ISR()`
 
 **4. volatile 漏用**：❌ `bool g_transfer_done; while(!g_transfer_done){}` → ✅ `volatile bool g_transfer_done;`
 
@@ -523,15 +573,19 @@ typedef struct {
 ### 12.1 回查清单
 
 - [ ] 仓库已有代码符合本规范则沿用，不符合则在不改变逻辑的前提下修改
+- [ ] 驱动层与应用层分层清晰：应用层不直写寄存器，驱动层不含业务逻辑，ISR 通过回调通知应用层
 - [ ] 硬件常量来自用户、仓库或 placeholder
 - [ ] 不编造寄存器/IRQ/barrier/cache 规则
 - [ ] 复用 vendor/CMSIS 结构
+- [ ] 寄存器结构体按功能模块分层：每个模块有独立子结构体，顶层按偏移组合，间隙用 RESERVED 填充
 - [ ] 无裸寄存器地址散落在业务逻辑
 - [ ] 无默认动态内存和 VLA
 - [ ] 命名/类型/错误处理符合本 skill 规范
+- [ ] 优先使用结构体、枚举组织数据，无散落的独立变量、裸整数状态码或魔法常量
 - [ ] REWRITE 保留行为/ABI/时序顺序
 - [ ] REVIEW correctness 和硬件风险优先于风格
 - [ ] ISR 无阻塞，RTOS 用 FromISR API
+- [ ] 驱动层和应用层函数体内有编号步骤注释（Step 1 / Step 2 / ...）标注关键操作顺序
 - [ ] DMA buffer 处理 cache coherency
 - [ ] 共享变量正确使用 volatile/atomic/互斥量
 
