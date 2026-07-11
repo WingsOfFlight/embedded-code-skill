@@ -251,24 +251,114 @@ typedef struct {
 
 ## 3. 寄存器抽象
 
-- 每个外设 block 一个独立 `*_reg.h`，使用 `*_reg_t` 寄存器结构体或复用 vendor/CMSIS 已有结构体
-- 一个明确入口访问寄存器（`*_REG` 或项目已有 wrapper），位字段使用 `MASK/SHIFT` 宏
-- 不把裸寄存器地址写散在业务逻辑里
-- 对 read-modify-write、reserved bits、write-one-to-clear、unlock sequence 保持谨慎
+### 3.1 强制规则：寄存器必须定义为结构体
+
+**所有外设寄存器块必须以 `*_reg_t` 结构体形式定义，禁止将寄存器散落为独立的 `#define` 地址宏。**
+
+| 要求 | 说明 |
+|------|------|
+| 一个外设一个 `*_reg.h` | 每个外设 block 独立一个头文件，仅含寄存器结构体、位定义宏、基地址宏，无 `.c` 无函数实现 |
+| 结构体命名 `*_reg_t` | 如 `uart_reg_t`、`spi_reg_t`、`dma_reg_t` |
+| 使用 `volatile uint32_t` 成员 | 所有寄存器成员必须 `volatile`，确保每次访问都真正读写硬件 |
+| 只读寄存器加 `const` | 状态寄存器等只读寄存器声明为 `const volatile uint32_t`，编译期阻止误写 |
+| reserved 区域显式填充 | 寄存器间的保留空间用 `const uint32_t RESERVED[n]` 占位，确保偏移正确 |
+| 一个明确的基地址入口 | 通过 `*_REG` 宏或项目已有 wrapper 访问，不裸写地址转换 |
+| 位字段用 `MASK/SHIFT` 宏 | 每个位域定义 `_MASK` 和 `_SHIFT` 宏，不写魔法数字 |
+
+### 3.2 标准模板
 
 ```c
-#define SPI_BASE_ADDR  (0xA0010000U)
-
+/* ===== 寄存器结构体 — 成员顺序 = 硬件地址升序 ===== */
 typedef struct {
-    volatile uint32_t CTRL;    /* 控制寄存器 */
-    volatile uint32_t STATUS;  /* 状态寄存器 */
-    volatile uint32_t DATA;    /* 数据寄存器 */
-} spi_reg_t;
+    /* --- 0x00 --- */
+    volatile uint32_t CTRL;          /* 控制寄存器：bit[0]=EN, bit[2:1]=MODE, bit[4]=IE */
+    const    uint32_t RESERVED0[3];  /* 0x04~0x0C 保留，禁止访问 */
+    /* --- 0x10 --- */
+    const    volatile uint32_t STATUS;  /* 状态寄存器：只读，bit[0]=TX_EMPTY, bit[1]=RX_FULL */
+    volatile uint32_t DATA;          /* 数据寄存器：写=TX FIFO，读=RX FIFO */
+    volatile uint32_t BAUD;          /* 波特率寄存器：BAUD = PCLK / (16 × target_rate) */
+} uart_reg_t;
 
-#define SPI_CTRL_EN_MASK    (1U << 0)
-#define SPI_CTRL_MODE_MASK  (3U << 2)
-#define SPI_REG  ((spi_reg_t *)SPI_BASE_ADDR)
+/* ===== 基地址宏 — 来自芯片参考手册 ===== */
+#define UART1_BASE_ADDR  (0x40001000U)  /* USER_PROVIDED: 以芯片手册 Memory Map 为准 */
+
+/* ===== 寄存器入口 — 全局唯一访问点 ===== */
+#define UART1_REG  ((uart_reg_t *)UART1_BASE_ADDR)
+
+/* ===== 位定义宏 — CTRL 寄存器 ===== */
+#define UART_CTRL_EN_MASK     (1U << 0)
+#define UART_CTRL_EN_SHIFT    (0U)
+#define UART_CTRL_MODE_MASK   (3U << 2)
+#define UART_CTRL_MODE_SHIFT  (2U)
+#define UART_CTRL_IE_MASK     (1U << 4)
+#define UART_CTRL_IE_SHIFT    (4U)
+
+/* ===== 位定义宏 — STATUS 寄存器 ===== */
+#define UART_STATUS_TX_EMPTY_MASK  (1U << 0)
+#define UART_STATUS_RX_FULL_MASK   (1U << 1)
+
+/* ===== 寄存器操作 helper 宏（可选，放 _reg.h 尾部） ===== */
+#define REG_SET_BITS(reg, mask, value)  \
+    ((reg) = ((reg) & ~(mask)) | ((value) << (mask##_SHIFT)))
+#define REG_GET_BITS(reg, mask)         \
+    (((reg) & (mask)) >> (mask##_SHIFT))
 ```
+
+### 3.3 结构体成员布局规范
+
+1. **成员顺序**必须与硬件寄存器地址升序一致，偏移隐含在结构体布局中。
+2. **reserved 区域**用 `const uint32_t RESERVEDn[count]` 显式占位，注释注明地址范围。
+3. **只读寄存器**声明为 `const volatile uint32_t` — 只读约束由编译器在编译期检查。
+4. **读写寄存器**声明为 `volatile uint32_t`。
+5. **写-only 寄存器**声明为 `volatile uint32_t`（C 语言无 write-only 限定符，靠注释说明）。
+6. **多字节访问**的寄存器组（如 64-bit timer counter）使用连续两个 `uint32_t` 成员，注释标注 low/high。
+7. 若同一地址存在**读/写含义不同**的寄存器对（如读=FIFO 数据，写=TX 数据），使用两个成员 `DATA_RD` 和 `DATA_WR` 并注释说明实际为同一地址。
+
+### 3.4 寄存器使用方式
+
+```c
+/* ✅ 正确：通过结构体访问 */
+UART1_REG->CTRL |= UART_CTRL_EN_MASK;
+uint32_t status = UART1_REG->STATUS;
+UART1_REG->DATA = tx_byte;
+
+/* ✅ 正确：read-modify-write 通过结构体 + mask */
+uint32_t ctrl = UART1_REG->CTRL;
+ctrl &= ~UART_CTRL_MODE_MASK;
+ctrl |= (UART_MODE_ASYNC << UART_CTRL_MODE_SHIFT);
+UART1_REG->CTRL = ctrl;
+
+/* ❌ 禁止：裸地址宏散落在业务逻辑中 */
+#define UART1_CTRL  (*(volatile uint32_t *)0x40001000U)
+#define UART1_DATA  (*(volatile uint32_t *)0x40001010U)
+UART1_CTRL = 0x01;
+UART1_DATA = tx_byte;
+```
+
+### 3.5 结构体 vs 宏方式的对比
+
+| 维度 | ✅ 结构体 `*_reg_t` | ❌ 散落 `#define` 地址宏 |
+|------|---------------------|--------------------------|
+| 地址一致性 | 基地址一处定义，编译器计算偏移 | 每个寄存器手算地址，易错位 |
+| reserved 处理 | `RESERVED[n]` 自动占位 | 需手动跳过，遗忘则后续寄存器全部错位 |
+| 可读性 | 结构体名即外设，成员名即寄存器 | 散落的宏定义，缺乏层级关系 |
+| 只读保护 | `const volatile` 编译期拦截误写 | 无保护，误写只在运行时暴露 |
+| 可移植性 | 换芯片仅改基地址 | 需逐个修改每个寄存器地址 |
+| IDE 支持 | 成员自动补全、跳转 | 无关联，纯文本搜索 |
+
+### 3.6 复用 vendor/CMSIS 已有结构体的例外
+
+若项目已使用 CMSIS 或厂商 SDK 提供的寄存器结构体（如 `USART_TypeDef`、`SPI_TypeDef`），则**直接复用**，不再自定义 `*_reg_t`。此时只需补充：
+- 缺失的位定义 `MASK/SHIFT` 宏
+- 寄存器入口宏 `*_REG`（若 SDK 未提供）
+
+```c
+/* 复用 STM32 CMSIS 结构体，仅补充位定义 */
+#define UART_SR_RXNE_MASK   USART_SR_RXNE
+#define UART_REG            (USART1)
+```
+
+**不可既自定义结构体又同时用裸地址宏来描述同一外设的寄存器。**
 
 ---
 
@@ -506,7 +596,23 @@ typedef struct {
 
 ## 11. 反例集
 
-**1. 寄存器散落**：❌ `#define SPI_CTRL_ADDR (*(volatile uint32_t*)0xA0010000U)` + 魔法数字 → ✅ `SPI_REG->CTRL = SPI_CTRL_INIT_VAL`
+**1. 寄存器散落为地址宏**：❌ 每个寄存器独立 `#define` 地址宏，手算偏移 → ✅ 一个 `*_reg_t` 结构体 + 一个基地址宏，编译器管理偏移
+
+```c
+/* ❌ 禁止：散落地址宏 — 手算偏移易错、无 reserved 占位、无只读保护 */
+#define UART_CTRL   (*(volatile uint32_t *)0x40001000U)
+#define UART_STATUS (*(volatile uint32_t *)0x40001010U)  /* 手算错：实际是 0x04 */
+#define UART_DATA   (*(volatile uint32_t *)0x40001014U)
+
+/* ✅ 必须：结构体定义 — 偏移由编译器计算、reserved 自动占位、const 保护只读 */
+typedef struct {
+    volatile uint32_t CTRL;                 /* 0x00 */
+    const    uint32_t RESERVED0[3];         /* 0x04~0x0C 自动占位 */
+    const    volatile uint32_t STATUS;      /* 0x10 只读保护 */
+    volatile uint32_t DATA;                 /* 0x14 */
+} uart_reg_t;
+#define UART1_REG  ((uart_reg_t *)0x40001000U)
+```
 
 **2. DMA cache coherency**：❌ 直接 DMA 读写无 cache 处理 → ✅ `SCB_InvalidateDCache_by_Addr()` 或放 non-cacheable section
 
@@ -525,8 +631,10 @@ typedef struct {
 - [ ] 仓库已有代码符合本规范则沿用，不符合则在不改变逻辑的前提下修改
 - [ ] 硬件常量来自用户、仓库或 placeholder
 - [ ] 不编造寄存器/IRQ/barrier/cache 规则
-- [ ] 复用 vendor/CMSIS 结构
-- [ ] 无裸寄存器地址散落在业务逻辑
+- [ ] 每个外设寄存器块均已定义为 `*_reg_t` 结构体（非散落 `#define` 地址宏）
+- [ ] reserved 区域已用 `RESERVED[n]` 占位，只读寄存器已加 `const`
+- [ ] 复用 vendor/CMSIS 结构（若项目已有）
+- [ ] 无裸寄存器地址散落在业务逻辑，所有寄存器访问通过结构体成员
 - [ ] 无默认动态内存和 VLA
 - [ ] 命名/类型/错误处理符合本 skill 规范
 - [ ] REWRITE 保留行为/ABI/时序顺序
