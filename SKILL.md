@@ -322,6 +322,95 @@ typedef struct {
 
 ---
 
+### 2.6 枚举规范
+
+#### 2.6.1 核心原则：优先枚举，其次宏
+
+**互相关联的整型常量集合，必须使用 `typedef enum` 定义命名类型，禁止用一堆 `#define` 替代。枚举提供类型安全、IDE 补全和调试器可读性。**
+
+#### 2.6.2 枚举 vs `#define` 的适用场景
+
+| 场景 | 用枚举 | 用 `#define` | 说明 |
+|------|--------|-------------|------|
+| 状态机状态 | ✅ | ❌ | `UART_STATE_IDLE` 等，调试器可显示符号名 |
+| 错误码 | ✅ | ❌ | 枚举值可逐步扩展，不破坏 ABI |
+| 外设模式选择 | ✅ | ❌ | `SPI_MODE_0/1/2/3`、`GPIO_MODE_INPUT` 等 |
+| 配置选项 | ✅ | ❌ | `DMA_DIR_PERIPH_TO_MEM` 等互斥选项 |
+| 寄存器位掩码 | ❌ | ✅ | 位宽和移位需精确定义，`(3U << 2)` 形式 |
+| 基地址/时钟频率 | ❌ | ✅ | 单个独立常量，非互相关联的集合 |
+| 数组大小/buffer 长度 | ❌ | ✅ | 用于 `uint8_t buf[MAX_SIZE]`，enum 不可做数组长度 |
+
+**判断标准**：如果一组常量在逻辑上属于同一"种类"（state / mode / error / speed / direction），用枚举；如果各自独立（地址 / 掩码 / 超时值），用宏。
+
+#### 2.6.3 命名与格式
+
+沿用 2.1 节命名规范：类型 `snake_case_t`，值 `PREFIXED_SNAKE`。
+
+```c
+/* 类型名：外设前缀 + 含义 + _t */
+typedef enum {
+    UART_STATE_IDLE      = 0,   /* 显式赋值，值有意义时不可省略 */
+    UART_STATE_TX_BUSY   = 1,
+    UART_STATE_RX_ACTIVE = 2,
+    UART_STATE_ERROR     = 3,
+} uart_state_t;
+
+/* 函数签名使用枚举类型，不用 int/uint32_t */
+uart_state_t uartGetState(uart_handle_t *handle);
+```
+
+#### 2.6.4 显式赋值规则
+
+| 情况 | 规则 | 示例 |
+|------|------|------|
+| 硬件定义的值（寄存器位段、datasheet 规定） | **必须**显式赋值 | `SPI_MODE_0 = 0, SPI_MODE_1 = 1` |
+| 错误码（跨模块、可能持久化） | **必须**显式赋值 | `ERR_TIMEOUT = -3` |
+| 通信协议中的命令/类型码 | **必须**显式赋值 | `CMD_PING = 0x01, CMD_READ = 0x02` |
+| 纯软件内部序列（状态机、流程步骤） | 可自增，首个建议显式 `= 0` | `STATE_IDLE = 0, STATE_BUSY, STATE_DONE` |
+
+**硬件相关的枚举不显式赋值是严重错误**：编译器可自由选择枚举值编码，不同编译选项可能导致硬件写入错误的值。
+
+#### 2.6.5 枚举用于状态机（强烈推荐）
+
+```c
+typedef enum {
+    SM_STATE_INIT  = 0,
+    SM_STATE_IDLE  = 1,
+    SM_STATE_RUN   = 2,
+    SM_STATE_FAULT = 3,
+} sm_state_t;
+
+typedef enum {
+    SM_EVENT_START  = 0,
+    SM_EVENT_STOP   = 1,
+    SM_EVENT_FAULT  = 2,
+    SM_EVENT_CLEAR  = 3,
+} sm_event_t;
+
+typedef struct {
+    sm_state_t state;
+    sm_state_t (*transition)(sm_state_t current, sm_event_t event);
+} state_machine_t;
+```
+
+#### 2.6.6 禁止的反模式
+
+| 反模式 | 问题 | 正确做法 |
+|--------|------|----------|
+| `#define` 定义关联常量 | `#define UART_IDLE 0` + `#define UART_TX 1` — 无类型、无分组 | `typedef enum { UART_STATE_IDLE = 0, ... } uart_state_t` |
+| 函数参数用 `int` 传枚举 | 丧失类型检查，可传入非法值 | `void setState(uart_state_t s)` |
+| `switch` 缺 `default` | 未覆盖的枚举值静默通过 | 每个 `switch(enum)` 必须有 `default: break` |
+| 枚举值无前缀 | 全局命名污染，不同模块冲突 | `UART_STATE_IDLE` 而非 `IDLE` |
+| 硬件值不自增 | `CMD_A, CMD_B, CMD_C` — 依赖编译器 | `CMD_A = 0x01, CMD_B = 0x02, CMD_C = 0x03` |
+
+#### 2.6.7 嵌入式特别注意事项
+
+- **枚举的底层类型**：C 标准中枚举是 `int` 类型，ARM GCC 默认也是 `int`。若需控制宽度（如存储到寄存器或打包到结构体），在结构体中使用 `uint8_t` / `uint16_t` 成员并显式类型转换，不强依赖编译器 `-fshort-enums`。
+- **寄存器位域不用枚举**：寄存器位域用 `#define MASK/SHIFT` 宏（见第 3 节），因为位域的宽度和位置必须精确控制。
+- **跨模块枚举放 `_reg.h` 或独立 `_types.h`**：多个 `.c` 共用的枚举（如状态码、模式定义）放在寄存器层头文件或项目共享的类型头文件中，避免重复定义。
+
+---
+
 ## 3. 寄存器抽象
 
 ### 3.1 强制规则：寄存器必须定义为结构体
@@ -591,6 +680,8 @@ typedef struct {
 
 **5. 优先级反转**：❌ `xSemaphoreCreateBinary()` 保护共享资源 → ✅ `xSemaphoreCreateMutex()` 优先级继承
 
+**6. 枚举滥用宏替代**：❌ `#define UART_IDLE 0` / `#define UART_TX 1` / `#define UART_RX 2` → ✅ `typedef enum { UART_STATE_IDLE = 0, ... } uart_state_t`（详见 2.6 节）
+
 ---
 
 ## 12. 回查清单与维护自检
@@ -606,7 +697,8 @@ typedef struct {
 - [ ] 无裸寄存器地址散落在业务逻辑，所有寄存器访问通过结构体成员
 - [ ] 无冗余/传递依赖的 `#include`，include 顺序符合规范
 - [ ] 无默认动态内存和 VLA
-- [ ] 命名/类型/错误处理符合本 skill 规范
+- [ ] 命名/类型/错误处理符合本 skill 规范；关联常量使用枚举而非 `#define`
+- [ ] 硬件相关枚举值已显式赋值，switch(enum) 含 default 分支
 - [ ] REWRITE 保留行为/ABI/时序顺序
 - [ ] REVIEW correctness 和硬件风险优先于风格
 - [ ] ISR 无阻塞，RTOS 用 FromISR API
