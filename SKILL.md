@@ -247,6 +247,105 @@ typedef struct {
  */
 ```
 
+### 2.5 头文件包含规范
+
+#### 2.5.1 核心原则：Include What You Use
+
+**每个 `.c` / `.h` 文件必须显式包含自身直接使用的符号所对应的头文件，不依赖传递包含，不保留不再使用的 `#include`。**
+
+| 规则 | 说明 |
+|------|------|
+| 自包含 | 每个头文件独立可编译 — 若 `a.h` 使用了 `uint32_t`，自身必须 `#include <stdint.h>` |
+| 直接包含 | 使用 `UART_HandleTypeDef` 则必须包含其定义所在头文件，不依赖其他头文件的传递 |
+| 最小化 | 头文件只包含接口必须的类型，实现细节的依赖放在 `.c` 中 |
+| 无冗余 | 删除不再使用的 `#include` — 重构或功能移除时同步清理 |
+| 无循环 | 通过前置声明 + include guard 避免循环依赖 |
+
+#### 2.5.2 Include 顺序
+
+项目无既有约定时，按以下顺序分组，组间空行分隔：
+
+```c
+/* 1. 自身头文件（.c 包含自己的 .h，验证自包含） */
+#include "uart_drv.h"
+
+/* 2. 项目内头文件（按模块依赖层级，低层在前） */
+#include "uart_reg.h"
+#include "gpio_drv.h"
+
+/* 3. 厂商 / RTOS / 第三方头文件 */
+#include "stm32f4xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
+
+/* 4. C 标准库头文件 */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+```
+
+#### 2.5.3 头文件中减少包含
+
+头文件中优先使用**前置声明**，将 `#include` 推迟到 `.c`：
+
+```c
+/* ===== uart_drv.h ===== */
+#include <stdint.h>       /* 接口用到 uint32_t → 必须包含 */
+#include <stdbool.h>      /* 接口用到 bool → 必须包含 */
+
+/* 前置声明 — 代替 #include "uart_reg.h" */
+typedef struct uart_reg_t uart_reg_t;   /* 指针参数只需前置声明 */
+
+typedef struct {
+    uart_reg_t *regs;                  /* 指针，前置声明足够 */
+    void (*rx_callback)(uint8_t byte); /* 函数指针 */
+} uart_drv_handle_t;
+
+/* ===== uart_drv.c ===== */
+#include "uart_drv.h"
+#include "uart_reg.h"   /* 实现中访问寄存器成员，这里才需要完整定义 */
+```
+
+**前置声明适用条件**：头文件仅将类型用作指针或引用（函数参数、结构体成员指针），不访问其成员、不计算 `sizeof`。
+
+#### 2.5.4 禁止的反模式
+
+| 反模式 | 问题 | 正确做法 |
+|--------|------|----------|
+| 传递依赖 | 依赖 `a.h` 间接包含的 `b.h` 中的符号 | 显式 `#include "b.h"` |
+| 遗留 include | 功能已移除但 include 保留 | 删除不再使用的 `#include` |
+| 万能头 | 项目中到处包含一个 `common.h` / `includes.h` | 各文件按需独立包含 |
+| 头文件包含 `.c` | `#include "foo.c"` | 用 `.h` 声明接口，链接 `.c` |
+| 相对路径 `../` | `#include "../module/foo.h"` | 用 `-I` 编译选项指定 include path |
+| 条件编译嵌套过深 | `#ifdef` 中包含 `#ifdef` 三级以上 | 拆分为平台抽象层，每层独立头文件 |
+| 循环包含 | `a.h` → `b.h` → `a.h` | 前置声明 + include guard |
+
+#### 2.5.5 Include Guard
+
+所有头文件必须有 include guard，使用 `#pragma once`（项目支持时）或传统的 `#ifndef` / `#define` 模式：
+
+```c
+/* 方式一：pragma once — 所有现代编译器支持，简洁 */
+#pragma once
+
+/* 方式二：传统宏守卫 — 兼容性更好，命名规则 MODULE_NAME_H_ */
+#ifndef UART_DRV_H_
+#define UART_DRV_H_
+
+/* ... 头文件内容 ... */
+
+#endif /* UART_DRV_H_ */
+```
+
+项目已使用其中一种时保持一致；项目无约定时优先 `#pragma once`。
+
+#### 2.5.6 嵌入式特有注意事项
+
+- **厂商 HAL 头文件**通常体积庞大——驱动层 `.h` 中若仅需某个厂商类型（如 `GPIO_TypeDef`），考虑前置声明替代包含整个 `stm32f4xx_hal.h`。
+- **RTOS 头文件**按需包含：仅用队列则 `#include "queue.h"` 而非 `#include "FreeRTOS.h"` 全家桶。
+- **中断服务文件中**的 include 保持最小，减少 ISR 上下文中的符号污染和潜在的链接器拖入。
+- **生成代码标记**：STM32CubeMX / MCUXpresso 等工具生成的 `/* USER CODE BEGIN Includes */` 区域内的 include 保持在该区域，不混入手动代码区域。
+
 ---
 
 ## 3. 寄存器抽象
@@ -635,6 +734,7 @@ typedef struct {
 - [ ] reserved 区域已用 `RESERVED[n]` 占位，只读寄存器已加 `const`
 - [ ] 复用 vendor/CMSIS 结构（若项目已有）
 - [ ] 无裸寄存器地址散落在业务逻辑，所有寄存器访问通过结构体成员
+- [ ] 无冗余/传递依赖的 `#include`，include 顺序符合规范
 - [ ] 无默认动态内存和 VLA
 - [ ] 命名/类型/错误处理符合本 skill 规范
 - [ ] REWRITE 保留行为/ABI/时序顺序
