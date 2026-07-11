@@ -1,6 +1,6 @@
 ---
 name: embedded-code-skill
-description: "嵌入式 C 代码助手：旧代码整理、低层固件审查、RTOS/构建系统/调试指导"
+description: "嵌入式 C 代码规范化助手：驱动骨架、旧代码整理、代码审查、寄存器重构"
 command: ecs
 user-invocable: true
 triggers:
@@ -42,7 +42,7 @@ triggers:
 
 ### 1.1 定位
 
-帮助处理嵌入式 C 代码：驱动骨架生成、旧代码整理、代码审查、RTOS/构建系统/调试指导。
+帮助处理嵌入式 C 裸机/驱动代码：驱动骨架生成、旧代码规范化整理、代码审查、寄存器重构。
 
 本 skill 提供**不绑定某个 IDE 或 agent 的保守编码规范**。任何真实寄存器偏移、位定义、reset 值、IRQ 号、时序限制、cache/DMA 规则和屏障要求，都必须来自目标芯片参考手册、厂商头文件、现有代码或用户提供的资料——**不编造硬件事实**。
 
@@ -208,29 +208,19 @@ typedef struct {
 
 #### 2.4.4 标记约定
 
-项目无既有约定时，使用以下统一标记：
+项目无既有约定时，必须标注以下三种标记；通用标记（`TODO`/`FIXME`/`NOTE`/`WARNING`/`HACK`/`OPTIMIZE`）按业界惯例使用即可。
 
 | 标记 | 含义 | 何时移除 |
 |------|------|----------|
 | `USER_PROVIDED` | 需用户填入真实硬件值 | 用户提供信息后 |
 | `PLACEHOLDER` | 临时占位值，功能正确但不完整 | 硬件信息确认后 |
 | `REPO_DERIVED` | 从仓库现有代码推导，可能不准确 | 对照手册验证后 |
-| `TODO:` | 待实现或待优化的功能 | 功能完成或优化后 |
-| `FIXME:` | 已知缺陷或临时 workaround | 缺陷修复后 |
-| `HACK:` | 依赖特定版本/硬件行为的临时方案 | 正式方案实现后 |
-| `NOTE:` | 重要但非显而易见的说明 | 永久保留 |
-| `WARNING:` | 潜在风险点，错误修改可能导致硬件损坏 | 永久保留 |
-| `OPTIMIZE:` | 已验证正确的候选优化点 | 优化实施后 |
-
-使用示例：
 
 ```c
-/* NOTE: 此函数不在 ISR 上下文中调用，无重入风险 */
-/* WARNING: 修改 BAUD 寄存器值可能导致正在进行的传输损坏 */
-/* FIXME: Rev.A 芯片需要额外 2 个 NOP 等待 FIFO 稳定，Rev.B 后移除 */
 /* USER_PROVIDED: 根据实际外部晶振频率填入 PLL 分频系数 */
 /* PLACEHOLDER: 当前使用 115200，最终波特率由系统设计决定 */
-/* HACK: 依赖 FreeRTOS v10.4+ 的 xQueueOverwriteFromISR，低版本需改用方案 B */
+/* WARNING: 修改 BAUD 寄存器值可能导致正在进行的传输损坏 */
+/* FIXME: Rev.A 芯片需要额外 2 个 NOP 等待 FIFO 稳定，Rev.B 后移除 */
 ```
 
 #### 2.4.5 文件头注释
@@ -322,29 +312,13 @@ typedef struct {
 
 #### 2.5.5 Include Guard
 
-所有头文件必须有 include guard，使用 `#pragma once`（项目支持时）或传统的 `#ifndef` / `#define` 模式：
-
-```c
-/* 方式一：pragma once — 所有现代编译器支持，简洁 */
-#pragma once
-
-/* 方式二：传统宏守卫 — 兼容性更好，命名规则 MODULE_NAME_H_ */
-#ifndef UART_DRV_H_
-#define UART_DRV_H_
-
-/* ... 头文件内容 ... */
-
-#endif /* UART_DRV_H_ */
-```
-
-项目已使用其中一种时保持一致；项目无约定时优先 `#pragma once`。
+所有头文件必须有 include guard。项目无约定时优先 `#pragma once`；需兼容老编译器时用 `#ifndef MODULE_NAME_H_` / `#define` / `#endif` 模式。项目已使用一种时保持一致。
 
 #### 2.5.6 嵌入式特有注意事项
 
-- **厂商 HAL 头文件**通常体积庞大——驱动层 `.h` 中若仅需某个厂商类型（如 `GPIO_TypeDef`），考虑前置声明替代包含整个 `stm32f4xx_hal.h`。
-- **RTOS 头文件**按需包含：仅用队列则 `#include "queue.h"` 而非 `#include "FreeRTOS.h"` 全家桶。
-- **中断服务文件中**的 include 保持最小，减少 ISR 上下文中的符号污染和潜在的链接器拖入。
-- **生成代码标记**：STM32CubeMX / MCUXpresso 等工具生成的 `/* USER CODE BEGIN Includes */` 区域内的 include 保持在该区域，不混入手动代码区域。
+- **厂商 HAL 头文件**体积庞大——驱动层 `.h` 中若仅需某个厂商类型，优先用前置声明替代包含整个 HAL 头文件。
+- **ISR 文件中** include 保持最小，减少符号污染和链接器拖入。
+- **代码生成工具**（STM32CubeMX 等）的 `/* USER CODE BEGIN Includes */` 区域内的 include 不混入手动区域。
 
 ---
 
@@ -363,6 +337,8 @@ typedef struct {
 | reserved 区域显式填充 | 寄存器间的保留空间用 `const uint32_t RESERVED[n]` 占位，确保偏移正确 |
 | 一个明确的基地址入口 | 通过 `*_REG` 宏或项目已有 wrapper 访问，不裸写地址转换 |
 | 位字段用 `MASK/SHIFT` 宏 | 每个位域定义 `_MASK` 和 `_SHIFT` 宏，不写魔法数字 |
+
+**为什么必须用结构体而非宏**：结构体由编译器计算偏移，基地址一变全变；`RESERVED[n]` 自动占位不留间隙；`const volatile` 编译期拦截只读寄存器误写。散落 `#define` 地址宏手算偏移极易错位且无任何保护。
 
 ### 3.2 标准模板
 
@@ -434,18 +410,7 @@ UART1_CTRL = 0x01;
 UART1_DATA = tx_byte;
 ```
 
-### 3.5 结构体 vs 宏方式的对比
-
-| 维度 | ✅ 结构体 `*_reg_t` | ❌ 散落 `#define` 地址宏 |
-|------|---------------------|--------------------------|
-| 地址一致性 | 基地址一处定义，编译器计算偏移 | 每个寄存器手算地址，易错位 |
-| reserved 处理 | `RESERVED[n]` 自动占位 | 需手动跳过，遗忘则后续寄存器全部错位 |
-| 可读性 | 结构体名即外设，成员名即寄存器 | 散落的宏定义，缺乏层级关系 |
-| 只读保护 | `const volatile` 编译期拦截误写 | 无保护，误写只在运行时暴露 |
-| 可移植性 | 换芯片仅改基地址 | 需逐个修改每个寄存器地址 |
-| IDE 支持 | 成员自动补全、跳转 | 无关联，纯文本搜索 |
-
-### 3.6 复用 vendor/CMSIS 已有结构体的例外
+### 3.5 复用 vendor/CMSIS 已有结构体的例外
 
 若项目已使用 CMSIS 或厂商 SDK 提供的寄存器结构体（如 `USART_TypeDef`、`SPI_TypeDef`），则**直接复用**，不再自定义 `*_reg_t`。此时只需补充：
 - 缺失的位定义 `MASK/SHIFT` 宏
@@ -513,40 +478,19 @@ module/
 
 ## 5. 架构规则
 
-架构相关代码包括 ISR、barrier、DMA、cache、interrupt controller、SMP、memory ordering、CSR/SPR 和 board bring-up。
+架构相关代码包括 ISR、barrier、DMA、cache、interrupt controller、memory ordering 和 board bring-up。
 
 ### 5.1 Quick Ref
 
-| 架构 | Barrier | Interrupt | CSR/SPR | 代表芯片 |
-|------|---------|-----------|---------|---------|
-| ARM Cortex-M | `__DMB()/__DSB()/__ISB()` | NVIC | N/A | STM32, GD32, NXP |
-| ARM Cortex-A | `dmb ish` | GIC | system registers | i.MX6/7, STM32MP |
-| RISC-V | `fence` | PLIC/CLINT | `csrr` | FE310, CH32V |
-| ESP32 (Xtensa) | `esp_cpu_dsb()` | INT matrix | `WSR`/`RSR` | ESP32, S2/S3 |
-| PowerPC | `msync` | PIC | `mfspr` | MPC5748 |
-| SPARC V8 | `stbar` | INTC | `rd psr` | LEON |
+| 架构 | Barrier | Interrupt | 代表芯片 |
+|------|---------|-----------|---------|
+| ARM Cortex-M | `__DMB()/__DSB()/__ISB()` | NVIC | STM32, GD32, NXP, RP2040 |
+| RISC-V | `fence` | PLIC/CLINT | FE310, CH32V |
+| ESP32 (Xtensa) | `esp_cpu_dsb()` | INT matrix | ESP32, S2/S3 |
 
-### 5.2 ESP32 关键差异
+> 其他架构（Cortex-A、PowerPC、SPARC）和平台细节（ESP32 IRAM_ATTR、nRF52 SoftDevice、RP2040 Pico SDK）仅在用户明确提及该芯片时才查阅对应文档，不在此展开。
 
-- ISR 必须标记 `IRAM_ATTR`，否则 Flash 操作期间崩溃；变量用 `DRAM_ATTR`
-- 中断中使用 `...FromISR()` 后缀 FreeRTOS API
-- SPI/I2C 通过 `spi_bus_initialize()` 等高层 API，非直接写寄存器
-- 双核：Core 0 跑 WiFi/BT 协议栈，应用放 Core 1
-
-### 5.3 RP2040 关键差异
-
-- Pico SDK，双 Cortex-M0+；`multicore_launch_core1(entry)` 启动 Core 1
-- 通过 `multicore_fifo_pop_blocking()` 跨核通信
-- DMA 使用 `dma_claim_unused_channel()` + `dma_channel_config_t`
-
-### 5.4 NRF52 关键差异
-
-- nrfx 驱动层 + SoftDevice BLE 协议栈
-- GPIO 中断通过 `nrfx_gpiote_in_init()` 回调注册
-- 应用中断优先级必须 > SoftDevice 优先级
-- 时序敏感操作放 PPI（可编程外设互连）
-
-### 5.5 未知架构处理
+### 5.2 未知架构处理
 
 1. 根据芯片、工具链、vendor headers 和已有低层代码判断架构
 2. 不确定时查官方文档或要求用户提供资料
@@ -555,67 +499,28 @@ module/
 
 ---
 
-## 6. RTOS 指导
+## 6. RTOS 场景速查
 
-### 6.1 任务设计
+裸机项目跳过本节。RTOS 项目仅在用户明确后才应用以下规则（不主动引入 RTOS 依赖）：
 
-| 关注点 | 规范 |
-|--------|------|
-| 栈大小 | 按实际使用量 + 20-30% 裕量，不盲目取默认值 |
-| 优先级 | 优先级反转风险高的任务使用互斥量（非二值信号量） |
-| 创建顺序 | 先创建同步原语，再创建使用它们的任务 |
-| 看门狗 | 长期阻塞任务必须有喂狗机制 |
-
-### 6.2 线程安全数据共享
-
-- **任务间**：互斥量保护（`osMutexAcquire/Release`）
-- **ISR→任务**：队列（FreeRTOS `xQueueSendFromISR` + `portYIELD_FROM_ISR`）
-- **简单标志**：`<stdatomic.h>` 原子操作或 `volatile` + 显式 barrier
-
-### 6.3 ISR 与 RTOS 交互
-
-- **禁止阻塞**：ISR 中绝不调用 `osDelay()`、`osMutexAcquire()` 等
-- **使用 FromISR**：FreeRTOS 中必须用 `...FromISR()` 后缀 API
-- **短且快**：ISR 只做读状态、清标志、通知任务、触发 DMA
-
-### 6.4 常用 API 对照
-
-| 功能 | FreeRTOS | Zephyr | RT-Thread |
-|------|----------|--------|-----------|
-| 任务 | `xTaskCreate()` | `k_thread_create()` | `rt_thread_create()` |
-| 互斥量 | `xSemaphoreCreateMutex()` | `K_MUTEX_DEFINE` | `rt_mutex_create()` |
-| 信号量 | `xSemaphoreCreateBinary()` | `k_sem_init()` | `rt_sem_create()` |
-| 队列 | `xQueueCreate()` | `k_msgq_init()` | `rt_mq_create()` |
-| 延时 | `vTaskDelay(pdMS_TO_TICKS(ms))` | `k_msleep(ms)` | `rt_thread_mdelay(ms)` |
-
-### 6.5 死锁预防
-
-- 多锁场景按固定顺序获取
-- 超时等待替代无限等待
-- 持锁期间不调用可能阻塞的 API
-- 优先级继承互斥量优先于二值信号量
+- **ISR 规则**：禁止阻塞（不调用 `osDelay`/`osMutexAcquire`），FreeRTOS 用 `...FromISR()` API，只做读状态→清标志→通知任务
+- **数据共享**：任务间用互斥量，ISR→任务用队列，简单标志用 `<stdatomic.h>`
+- **死锁预防**：固定锁顺序、超时替代无限等待、持锁不调阻塞 API
+- **常用 RTOS**：FreeRTOS / Zephyr / RT-Thread 的 API 对照仅在用户指定 RTOS 时提供
 
 ---
 
 ## 7. 构建系统与链接
 
-### 7.1 Linker Script 关键点
+### 7.1 Linker Script 与 Startup
 
-```ld
-MEMORY { FLASH (rx): ORIGIN=0x08000000, LENGTH=512K  RAM (rwx): ORIGIN=0x20000000, LENGTH=128K }
-SECTIONS {
-    .text   : { *(.text*) }   > FLASH
-    .rodata : { *(.rodata*) } > FLASH
-    .data   : { __data_start = .; *(.data*) __data_end = .; } > RAM AT > FLASH
-    .bss    : { __bss_start = .; *(.bss*) *(COMMON) __bss_end = .; } > RAM
-}
+```
+Reset_Handler：搬运 .data（Flash→RAM）→ 清零 .bss → SystemInit() → main()
 ```
 
-### 7.2 Startup 代码
+MEMORY 中 FLASH 放 `.text`/`.rodata`，RAM 放 `.data`/`.bss`；`__data_start/end` 和 `__bss_start/end` 符号供 startup 引用。
 
-`Reset_Handler`：1) 搬运 `.data`（Flash→RAM）→ 2) 清零 `.bss` → 3) `SystemInit()` → 4) `main()`
-
-### 7.3 编译器 Attribute
+### 7.2 编译器 Attribute
 
 | 用途 | 写法 |
 |------|------|
@@ -625,15 +530,9 @@ SECTIONS {
 | 弱符号 | `__attribute__((weak))` |
 | 始终内联 | `__attribute__((always_inline))` |
 
-### 7.4 CMake 交叉编译
+### 7.3 构建工具
 
-```cmake
-set(CMAKE_SYSTEM_NAME Generic)
-set(TOOLCHAIN_PREFIX arm-none-eabi-)
-set(CMAKE_C_COMPILER ${TOOLCHAIN_PREFIX}gcc)
-set(CMAKE_C_FLAGS_INIT "-mcpu=cortex-m4 -mthumb -Wall -Wextra")
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-T${CMAKE_SOURCE_DIR}/linker.ld -Wl,--gc-sections")
-```
+交叉编译 CMake 模板仅在用户使用 CMake 时提供（`CMAKE_SYSTEM_NAME Generic` + `arm-none-eabi-` toolchain）；Makefile/Keil/IAR 按项目现有构建系统沿用。
 
 ---
 
@@ -641,7 +540,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-T${CMAKE_SOURCE_DIR}/linker.ld -Wl,--gc-sectio
 
 ### 8.1 HAL Mock 模式
 
-通过函数指针表实现可替换 HAL：
+通过函数指针表实现可替换 HAL：生产用 `uart_hal_hw`，测试用 `uart_hal_mock`。
 
 ```c
 typedef struct {
@@ -650,36 +549,23 @@ typedef struct {
 } uart_hal_t;
 ```
 
-生产用 `uart_hal_hw`，测试用 `uart_hal_mock`，驱动通过 `handle->hal` 指针操作。
-
 ### 8.2 断言分级
 
-- `STATIC_ASSERT(cond, msg)` → `_Static_assert`，编译期
-- `ASSERT(cond)` → 运行时，调用 `assertFailed(file, line)`
+- `STATIC_ASSERT(cond, msg)` → `_Static_assert`，编译期检查（寄存器偏移、结构体大小）
+- `ASSERT(cond)` → 运行时，仅在 debug build 生效
 - `SOFT_ASSERT(cond, action)` → 生产代码不 crash，记录错误后执行 action
 
-### 8.3 On-Target 调试约定
+### 8.3 裸机调试要点
 
-| 约定 | 说明 |
-|------|------|
-| 调试引脚 | 保留至少 1 个 GPIO 用于 SWO/printf |
-| 错误码追踪 | 错误路径记录文件/行号，宏开关控制 |
-| 栈溢出检测 | 任务栈底部填 watermark pattern，运行后检查 |
-| 日志级别 | ERROR > WARN > INFO > DEBUG，生产代码只保留 ERROR/WARN |
+- 保留至少 1 个 GPIO 用于 SWO/printf 或逻辑分析仪触发
+- 栈溢出检测：栈底填 watermark pattern，定期检查
+- 日志级别 ERROR > WARN > INFO > DEBUG，生产固件只保留 ERROR
 
 ---
 
 ## 9. 行业领域
 
-| 领域 | 关键词 | 默认要求 | 不要默认声明 |
-|------|--------|----------|-------------|
-| Aerospace | DO-178C, DAL, ARINC | 无动态分配、确定性行为、无递归、需求 ID 可追踪 | DAL 等级、MC/DC 覆盖率 |
-| Military | 1553B, SpaceWire, MIL-STD | 冗余、SEU 防护、BIT diagnostics | MIL-STD 等级 |
-| Industrial | IEC 61508, SIL, PLC | safe state 明确、watchdog supervision | SIL 等级、SPFM/LFM |
-| Automotive | ISO 26262, ASIL, CANFD | 接口隔离、故障传播控制 | ASIL 等级 |
-| General | — | 不默认声明认证要求 | — |
-
-只有用户或项目资料明确标准和等级时才写合规结论。
+仅在用户或项目资料明确标准（DO-178C / ISO 26262 / IEC 61508 / MIL-STD）时才应用对应规则，**不默认声明任何认证等级或合规结论**。通用裸机项目不主动引入行业约束。
 
 ---
 
@@ -695,23 +581,7 @@ typedef struct {
 
 ## 11. 反例集
 
-**1. 寄存器散落为地址宏**：❌ 每个寄存器独立 `#define` 地址宏，手算偏移 → ✅ 一个 `*_reg_t` 结构体 + 一个基地址宏，编译器管理偏移
-
-```c
-/* ❌ 禁止：散落地址宏 — 手算偏移易错、无 reserved 占位、无只读保护 */
-#define UART_CTRL   (*(volatile uint32_t *)0x40001000U)
-#define UART_STATUS (*(volatile uint32_t *)0x40001010U)  /* 手算错：实际是 0x04 */
-#define UART_DATA   (*(volatile uint32_t *)0x40001014U)
-
-/* ✅ 必须：结构体定义 — 偏移由编译器计算、reserved 自动占位、const 保护只读 */
-typedef struct {
-    volatile uint32_t CTRL;                 /* 0x00 */
-    const    uint32_t RESERVED0[3];         /* 0x04~0x0C 自动占位 */
-    const    volatile uint32_t STATUS;      /* 0x10 只读保护 */
-    volatile uint32_t DATA;                 /* 0x14 */
-} uart_reg_t;
-#define UART1_REG  ((uart_reg_t *)0x40001000U)
-```
+**1. 寄存器散落为地址宏**：❌ 每个寄存器独立 `#define` 地址宏 → ✅ 一个 `*_reg_t` 结构体 + 基地址宏（详见第 3 节）
 
 **2. DMA cache coherency**：❌ 直接 DMA 读写无 cache 处理 → ✅ `SCB_InvalidateDCache_by_Addr()` 或放 non-cacheable section
 
