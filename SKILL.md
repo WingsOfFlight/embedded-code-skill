@@ -159,9 +159,18 @@ typedef enum {
 
 #### 2.4.3 注释格式
 
-**函数注释**（公共 API 必须有，静态辅助函数酌情）：
+**函数注释**：
+
+| 函数类型 | 注释位置 | 格式 | 说明 |
+|---------|---------|------|------|
+| 公共 API | **`.h` 声明处** | Doxygen `@brief/@param/@return/@note` | 唯一文档源，`.c` 定义处不重复 |
+| 公共 API 的 `.c` 定义 | `.c` 实现处 | 仅简要行注释（如有非显而易见逻辑） | 解释"如何做"而非"做什么" |
+| `static` 函数 | `.c` 定义处 | Doxygen 或简要注释 | 无 `.h` 声明，注释必须写在定义处 |
+
+**为什么 `.c` 不重复 Doxygen 注释**：双重维护必然漂移——修改实现时容易只改一处，另一处过时。`.h` 是 API 合约，一处更新，调用方和实现方同步可见。
 
 ```c
+/* ===== uart_drv.h ===== */
 /**
  * @brief  初始化 UART 外设并配置波特率
  * @param  handle  UART 句柄指针，调用前需填充 config 字段
@@ -172,7 +181,34 @@ typedef enum {
  * @note   本函数会禁用 UART 后重新配置，不保留当前状态
  */
 embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud);
-```
+
+/* ===== uart_drv.c ===== */
+/* （公共 API 不重复 Doxygen 注释，仅标注非显而易见的实现要点） */
+embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud)
+{
+    VALIDATE_NOT_NULL(handle);
+
+    /* 先关使能再配置，防止 FIFO 残留数据导致错位（参考手册 §12.3.2） */
+    UART1_REG->CTRL &= ~UART_CTRL_EN_MASK;
+    /* ... */
+    /* 等待波特率发生器稳定（≥2 个 PCLK 周期） */
+    for (volatile int i = 0; i < 100; i++) { __NOP(); }
+    /* ... */
+    handle->initialized = true;
+    return EmbedCode_Ok;
+}
+
+/* ===== uart_drv.c（static 函数必须有注释，无 .h 声明） ===== */
+/**
+ * @brief  计算波特率分频值
+ * @param  target_baud 目标波特率
+ * @return 分频寄存器写入值
+ * @note   公式：DIV = PCLK / (16 × target_baud)，PCLK 来自系统时钟配置
+ */
+static uint32_t calcBaudDivider(uint32_t target_baud)
+{
+    return (SYSTEM_PCLK / (16U * target_baud));
+}
 
 **内联注释**（关键行上方或同行）：
 
