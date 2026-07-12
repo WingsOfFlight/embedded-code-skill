@@ -524,6 +524,83 @@ typedef struct {
 
 ---
 
+### 2.7 静态作用域（static）规范
+
+#### 2.7.1 核心原则：默认 static，公开例外
+
+**所有仅在当前 `.c` 内使用的函数和全局变量必须声明为 `static`。** 在 C 语言缺乏命名空间和访问控制的前提下，`static` 是实现模块封装的一等机制——限制符号可见范围、防止跨模块命名冲突、告知编译器可以进行更激进的内联优化。
+
+**只有模块公共 API（`.h` 中声明的函数和全局变量）不加 `static`。**
+
+#### 2.7.2 static 适用范围
+
+| 对象 | 规则 | 示例 |
+|------|------|------|
+| **内部辅助函数** | **必须** `static` | 寄存器位操作 helper、校验函数、查表函数 |
+| **ISR 处理函数** | **必须** `static` | `static void UART_IRQHandler(void)` — 仅由中断向量表引用 |
+| **DMA/回调函数** | **必须** `static` | `static void dmaTxComplete(void)` — 仅注册为回调 |
+| **文件级全局变量** | **必须** `static` | `static uart_handle_t g_uart1_handle` — 模块私有状态 |
+| **查找表 / 常量数据** | **必须** `static const` | `static const uint16_t baud_div_table[]` — 编译期只读 |
+| **函数内持久状态** | **建议** `static` 局部 | `static bool first_init_done = false` — 单次初始化标记 |
+| **公共 API 函数** | **禁止**加 `static` | `.h` 中声明的接口函数 |
+| **公共全局变量** | **禁止**加 `static` | `.h` 中 `extern` 声明的 `g_xxx` |
+
+#### 2.7.3 三层架构中的 static 应用
+
+结合第 4 节三层五文件架构，`static` 的分布如下：
+
+```c
+/* ===== module_reg.h ===== */
+/* 无函数，不含 static */
+
+/* ===== module_drv.h ===== */
+/* 仅声明公共 API，不加 static */
+void uartDrvInit(uart_drv_handle_t *h);
+void uartDrvSendByte(uint8_t byte);
+void uartDrvIRQHandler(void);    /* 公共：应用层可能需手动触发中断处理 */
+
+/* ===== module_drv.c ===== */
+static uint32_t readStatus(void);       /* static：内部寄存器读取 */
+static void writeCtrl(uint32_t val);    /* static：内部寄存器写入 */
+static void clearFlags(uint32_t mask);  /* static：内部标志清除 */
+static void txIsrCallback(void);        /* static：仅 ISR 内调用 */
+
+static uart_drv_handle_t g_uart1_drv;   /* static：模块私有驱动句柄 */
+static volatile bool g_tx_done;         /* static：模块私有传输标志 */
+
+/* （公共 API 实现，不加 static） */
+void uartDrvInit(uart_drv_handle_t *h) { /* ... */ }
+
+/* ===== module.h ===== */
+void uartInit(uart_config_t *cfg);       /* 公共 API */
+uart_status_t uartSend(uint8_t *buf, uint16_t len);
+
+/* ===== module.c ===== */
+static bool validateBaud(uint32_t baud); /* static：内部校验 */
+static void ringBufPush(uint8_t byte);   /* static：环形缓冲区操作 */
+
+static uint8_t g_rx_ring_buf[256];       /* static：模块私有缓冲区 */
+```
+
+#### 2.7.4 禁止的反模式
+
+| 反模式 | 问题 | 正确做法 |
+|--------|------|----------|
+| 内部函数缺 `static` | 暴露到全局符号表，可能与其他模块冲突，阻止编译器内联优化 | 所有非 API 函数加 `static` |
+| 全局变量缺 `static` | 任意 `.c` 可通过 `extern` 访问，破坏封装 | 模块私有变量加 `static` |
+| 头文件中声明 `static` 函数 | 每个包含该 `.h` 的 `.c` 都会生成一份副本，代码膨胀 | `.h` 只声明 API，`static` 定义留在 `.c` |
+| 大范围 `static` 局部变量 | 函数内 `static` 变量使得函数不可重入，ISR 中危险 | ISR 中禁止 `static` 局部变量 |
+| 用 `static` 替代头文件声明 | `a.c` 中 `static` 定义的函数，`b.c` 中 `extern` 不到 | 跨模块使用的函数放 `.h` 声明，不加 `static` |
+
+#### 2.7.5 嵌入式特别注意事项
+
+- **ISR 中的 `static` 局部变量**：禁止。ISR 上下文不可重入风险高，状态通过 `volatile` 全局变量或句柄成员传递。
+- **DMA buffer 的 `static`**：DMA 传输缓冲区通常 `static` 分配（避免栈上分配），配合 `__attribute__((section(".dma_buf")))` 或 `__attribute__((aligned(32)))` 确保对齐。
+- **`static const` 查找表**：Flash 有限时优先，编译器会将 `static const` 放入 `.rodata` 而非 `.data`。
+- **启动文件中的 `static`**：`startup_xxx.c` 中的 `Default_Handler` 等弱符号函数不加 `static`（需全局可见），其余辅助函数加 `static`。
+
+---
+
 ## 3. 寄存器抽象
 
 ### 3.1 强制规则：寄存器必须定义为结构体
@@ -795,6 +872,8 @@ typedef struct {
 
 **6. 枚举滥用宏替代**：❌ `#define UART_IDLE 0` / `#define UART_TX 1` / `#define UART_RX 2` → ✅ `typedef enum { UART_STATE_IDLE = 0, ... } uart_state_t`（详见 2.6 节）
 
+**7. 内部函数/变量缺 `static`**：❌ `void calcDivider(void)` + `uint8_t rx_buf[256]` 裸露全局 → ✅ `static void calcDivider(void)` + `static uint8_t rx_buf[256]`（详见 2.7 节）
+
 ---
 
 ## 12. 回查清单与维护自检
@@ -815,6 +894,7 @@ typedef struct {
 - [ ] 硬件相关枚举值已显式赋值，switch(enum) 含 default 分支
 - [ ] REWRITE 保留行为/ABI/时序顺序
 - [ ] REVIEW correctness 和硬件风险优先于风格
+- [ ] 内部函数和模块私有变量均已加 `static`，公共 API 无 `static`
 - [ ] ISR 无阻塞，RTOS 用 FromISR API
 - [ ] DMA buffer 处理 cache coherency
 - [ ] 共享变量正确使用 volatile/atomic/互斥量
