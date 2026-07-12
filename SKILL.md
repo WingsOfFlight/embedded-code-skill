@@ -90,17 +90,26 @@ triggers:
 
 - 公共接口优先使用 `<stdint.h>`、`<stdbool.h>`、`<stddef.h>`；默认 `uint8_t` / `uint16_t` / `uint32_t`、`int32_t`、`bool`
 - 不把 `int`、`char`、`long` 作为默认跨平台接口类型
+- **指针参数的 `const` 契约**：输入型指针（函数只读不写）必须加 `const`；输出型指针不加。这是 API 自文档化的关键手段：
+  ```c
+  /* ✅ buf 只读输入 → const；len 为非指针值参 → 不加 const */
+  status_t uartSend(const uint8_t *buf, uint16_t len);
+  /* ✅ handle 为读写输出 → 不加 const */
+  status_t uartInit(uart_handle_t *handle);
+  /* ❌ 输入指针缺 const — 调用方无法确定 buf 是否会被修改 */
+  status_t uartSend(uint8_t *buf, uint16_t len);
+  ```
 
 项目没有既有 status 类型时，公共函数默认返回 `embedded_code_status_t`：
 
 ```c
 typedef enum {
-    EmbedCode_Ok          =  0,
-    EmbedCode_ErrNullPtr  = -1,
+    EmbedCode_OK            =  0,
+    EmbedCode_ErrNullPtr    = -1,
     EmbedCode_ErrInvalidArg = -2,
-    EmbedCode_ErrTimeout  = -3,
-    EmbedCode_ErrBusy     = -4,
-    EmbedCode_ErrNotInit  = -5,
+    EmbedCode_ErrTimeout    = -3,
+    EmbedCode_ErrBusy       = -4,
+    EmbedCode_ErrNotInit    = -5,
 } embedded_code_status_t;
 
 #define VALIDATE_NOT_NULL(ptr) \
@@ -131,9 +140,9 @@ typedef struct {
 
 typedef enum {
     UART_STATE_IDLE      = 0,
-    UART_STATE_TX_BUSY,
-    UART_STATE_RX_ACTIVE,
-    UART_STATE_ERROR,
+    UART_STATE_TX_BUSY   = 1,
+    UART_STATE_RX_ACTIVE = 2,
+    UART_STATE_ERROR     = 3,
 } uart_state_t;
 ```
 
@@ -175,7 +184,7 @@ typedef enum {
  * @brief  初始化 UART 外设并配置波特率
  * @param  handle  UART 句柄指针，调用前需填充 config 字段
  * @param  baud    目标波特率（支持 9600 / 115200 / 921600）
- * @return EmbedCode_Ok 成功；EmbedCode_ErrNullPtr handle 为空；
+ * @return EmbedCode_OK 成功；EmbedCode_ErrNullPtr handle 为空；
  *         EmbedCode_ErrInvalidArg 波特率不支持
  * @note   调用前需确保 GPIO 已配置为 AF 模式
  * @note   本函数会禁用 UART 后重新配置，不保留当前状态
@@ -195,7 +204,7 @@ embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud)
     for (volatile int i = 0; i < 100; i++) { __NOP(); }
     /* ... */
     handle->initialized = true;
-    return EmbedCode_Ok;
+    return EmbedCode_OK;
 }
 
 /* ===== uart_drv.c（static 函数必须有注释，无 .h 声明） ===== */
@@ -297,7 +306,7 @@ typedef struct {
 | `@depends` | 建议 | 建议 | 本文件直接依赖的头文件或模块，用于快速定位编译/链接依赖 |
 | `@note` | 实现方式、硬件依赖、运行限制 | 调用约束 | `.h` 写调用前提和限制；`.c` 写实现要点、裸机/RTOS 环境、ISR 约束，可多条 |
 
-**`@brief` 分层前缀**（必须二选一）：
+**`@brief` 分层前缀**（必须三选一）：
 
 | 前缀 | 适用文件 | 示例 |
 |------|---------|------|
@@ -376,10 +385,8 @@ typedef struct {
 #include "uart_reg.h"
 #include "gpio_drv.h"
 
-/* 3. 厂商 / RTOS / 第三方头文件 */
+/* 3. 厂商 / 第三方头文件 */
 #include "stm32f4xx_hal.h"
-#include "FreeRTOS.h"
-#include "task.h"
 
 /* 4. C 标准库头文件 */
 #include <stdint.h>
@@ -819,11 +826,9 @@ typedef struct {
 #define UART_STATUS_TX_EMPTY_MASK  (1U << 0)
 #define UART_STATUS_RX_FULL_MASK   (1U << 1)
 
-/* ===== 寄存器操作 helper 宏（可选，放 _reg.h 尾部） ===== */
-#define REG_SET_BITS(reg, mask, value)  \
-    ((reg) = ((reg) & ~(mask)) | ((value) << (mask##_SHIFT)))
-#define REG_GET_BITS(reg, mask)         \
-    (((reg) & (mask)) >> (mask##_SHIFT))
+/* ===== 寄存器操作 helper 宏（可选，放 _reg.h 尾部，安全规范见 2.9 节） ===== */
+#define REG_SET_BITS(reg, mask, value)  /* 宏实现见 2.9.2 节 */
+#define REG_GET_BITS(reg, mask)         /* 宏实现见 2.9.2 节 */
 ```
 
 ### 3.3 结构体成员布局规范
@@ -835,6 +840,7 @@ typedef struct {
 5. **写-only 寄存器**声明为 `volatile uint32_t`（C 语言无 write-only 限定符，靠注释说明）。
 6. **多字节访问**的寄存器组（如 64-bit timer counter）使用连续两个 `uint32_t` 成员，注释标注 low/high。
 7. 若同一地址存在**读/写含义不同**的寄存器对（如读=FIFO 数据，写=TX 数据），使用两个成员 `DATA_RD` 和 `DATA_WR` 并注释说明实际为同一地址。
+8. **禁止 C 位域（bit-field）用于寄存器定义**：`struct { uint32_t enable : 1; }` 的位域布局（起始位、填充方向、跨字节行为）是编译器实现定义的，不可移植。硬件寄存器一律用 `MASK/SHIFT` 宏。
 
 ### 3.4 寄存器使用方式
 
@@ -917,7 +923,6 @@ module/
 | GPIO | `MODE, INPUT/DATA, OUTPUT_DATA, BIT_SET_RESET` | `regs, pin_map` | `pin_callbacks[], gpio_mode_t, drv_handle` |
 | Timer | `CTRL, COUNT, AUTO_RELOAD, PRESCALER` | `regs, prescaler, auto_reload` | `period, callback, drv_handle` |
 | Watchdog | `KEY, RELOAD, STATUS` | `regs, key_reg` | `timeout_ms, drv_handle` |
-| MIL-STD-1553 | `CMD, STATUS, DATA[n]` | `regs, mode` | `msg_t, drv_handle` |
 
 **反模式**：寄存器散落成地址宏、应用层直写寄存器、驱动层分配 buffer/处理协议帧、ISR 中阻塞。
 
@@ -1032,11 +1037,11 @@ typedef struct {
 
 **2. DMA cache coherency**：❌ 直接 DMA 读写无 cache 处理 → ✅ `SCB_InvalidateDCache_by_Addr()` 或放 non-cacheable section
 
-**3. ISR 阻塞**：❌ `osSemaphoreAcquire(uart_sem, osWaitForever)` → ✅ `xSemaphoreGiveFromISR()` + `portYIELD_FROM_ISR()`
+**3. ISR 中忙等/阻塞**：❌ ISR 中 `while (!(REG->STATUS & FLAG)) {}` 忙等或调用阻塞函数 → ✅ ISR 只做读状态→清标志→设标志位/回调通知，耗时操作交主循环处理
 
 **4. volatile 漏用**：❌ `bool g_transfer_done; while(!g_transfer_done){}` → ✅ `volatile bool g_transfer_done;`
 
-**5. 优先级反转**：❌ `xSemaphoreCreateBinary()` 保护共享资源 → ✅ `xSemaphoreCreateMutex()` 优先级继承
+**5. 关中断时间过长**：❌ 关中断后执行复杂计算或外设等待 → ✅ 关中断仅保护最必要的几条指令，其余操作用 `volatile` 标志 + 主循环协同
 
 **6. 枚举滥用宏替代**：❌ `#define UART_IDLE 0` / `#define UART_TX 1` / `#define UART_RX 2` → ✅ `typedef enum { UART_STATE_IDLE = 0, ... } uart_state_t`（详见 2.6 节）
 
