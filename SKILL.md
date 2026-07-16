@@ -192,17 +192,23 @@ typedef enum {
 embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud);
 
 /* ===== uart_drv.c ===== */
-/* （公共 API 不重复 Doxygen 注释，仅标注非显而易见的实现要点） */
+/* （公共 API 不重复 Doxygen 注释，函数体内用 Step 注释标注关键步骤，见 2.4.4 节） */
 embedded_code_status_t uartInit(uart_handle_t *handle, uint32_t baud)
 {
+    /* Step 1: 参数校验 */
     VALIDATE_NOT_NULL(handle);
 
-    /* 先关使能再配置，防止 FIFO 残留数据导致错位 */
+    /* Step 2: 先关使能再配置，防止 FIFO 残留数据导致错位 */
     UART1_REG->CTRL &= ~UART_CTRL_EN_MASK;
-    /* ... */
-    /* 等待波特率发生器稳定（≥2 个 PCLK 周期） */
+
+    /* Step 3: 配置波特率 */
+    UART1_REG->BAUD = calcBaudDivider(baud);
+
+    /* Step 4: 等待波特率发生器稳定（≥2 个 PCLK 周期） */
     for (volatile int i = 0; i < 100; i++) { __NOP(); }
-    /* ... */
+
+    /* Step 5: 使能外设，标记初始化完成 */
+    UART1_REG->CTRL |= UART_CTRL_EN_MASK;
     handle->initialized = true;
     return EmbedCode_OK;
 }
@@ -748,6 +754,7 @@ MEMORY 中 FLASH 放 `.text`/`.rodata`，RAM 放 `.data`/`.bss`；`__data_start/
 - [ ] 仓库已有代码符合本规范则沿用，不符合则在不改变逻辑的前提下修改
 - [ ] 硬件常量来自用户、仓库或 placeholder
 - [ ] 不编造寄存器/IRQ/barrier/cache 规则
+- [ ] 驱动层与应用层分层清晰：应用层不直写寄存器，驱动层不含业务逻辑，必须符合强解耦标准
 - [ ] 每个外设寄存器块均已定义为 `*_reg_t` 结构体（非散落 `#define` 地址宏）
 - [ ] reserved 区域已用 `RESERVED[n]` 占位，只读寄存器已加 `const`
 - [ ] 复用 vendor/CMSIS 结构（若项目已有）
